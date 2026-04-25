@@ -1,0 +1,31 @@
+board:
+  id: NEUROPAWN_KNIGHT_BOARD_IMU
+  serial_port: /dev/cu.usbserial-A5069RR4
+  active_exg_channels: [1, 2, 3, 4]
+  gain: 12
+  buffer_size: 450000
+  configure_channels: true
+  stream_settle_seconds: 2.0
+  config_command_delay_seconds: 0.5
+
+channel_map:
+  1: frontal_left
+  2: frontal_right
+  3: jaw_left
+  4: jaw_right
+
+imu:
+  use_magnetometer: false
+  gyro_units: auto
+  beta: 0.200
+  pivot_z: 0.250
+  swap_pitch_roll: false
+  invert_roll: false
+
+mouse:
+  dead_zone_degrees: 3.0
+  speed_px_per_second_per_degree: 70.0
+  max_speed_px_per_second: 1400.0
+  smoothing: 0.35
+  invert_x: false
+  invert_y: false

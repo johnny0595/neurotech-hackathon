@@ -1,0 +1,38 @@
+[project]
+name = "neuropawn-head-cursor"
+version = "0.1.0"
+description = "Hardware-first NeuroPawn Knight IMU diagnostics and head cursor foundation."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ahrs>=0.3.1",
+    "brainflow>=5.21.0",
+    "numpy>=1.26",
+    "PyOpenGL>=3.1.7",
+    "pyserial>=3.5",
+    "PySide6>=6.8",
+    "pyqtgraph>=0.13.7",
+    "PyYAML>=6.0",
+    "scikit-learn>=1.4",
+    "scipy>=1.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+neuro-cursor = "neuro_cursor.app:main"
+neuro-smoke = "neuro_cursor.smoke:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/neuro_cursor"]
