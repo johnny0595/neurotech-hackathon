@@ -10,6 +10,7 @@ import numpy as np
 
 from .brainflow_adapter import BoardConnectionError, KnightBrainFlowAdapter
 from .config import DEFAULT_CONFIG_PATH, load_config
+from .diagnostics import exg_channel_status, write_snapshot
 from .ports import list_usbserial_ports
 from .rows import (
     ACCEL_ROWS,
@@ -38,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--disable-exg",
         action="store_true",
         help="Send choff_1..choff_8 before collecting, useful for IMU-only cursor checks",
+    )
+    parser.add_argument(
+        "--capture-snapshot",
+        action="store_true",
+        help="Save latest row stats and active EXG status under data/snapshots/",
     )
     return parser
 
@@ -128,6 +134,39 @@ def main(argv: list[str] | None = None) -> int:
             f"  {stat.row:02d} {ROW_LABELS[stat.row]:>16}: "
             f"latest={stat.latest:>12.4f} mean={stat.mean:>12.4f} spread={stat.spread:>10.4f}"
         )
+
+    active_statuses = [
+        status
+        for status in exg_channel_status(data, config.board.active_exg_channels)
+        if status.active
+    ]
+    print("\nActive EXG check:")
+    if not active_statuses:
+        print("  no active EXG channels configured")
+    for status in active_statuses:
+        print(
+            f"  ch{status.channel} row {status.row:02d} {status.label}: "
+            f"{status.status} latest={status.latest:.4f} spread={status.spread:.4f}"
+        )
+    missing = [status.channel for status in active_statuses if status.status != "live"]
+    if missing:
+        print(
+            "  channels not live: "
+            f"{missing}. Check physical switches, positive-rail electrode leads, and RLD/COMM reference."
+        )
+
+    if args.capture_snapshot:
+        path = write_snapshot(
+            data[:, -250:],
+            config.board.active_exg_channels,
+            metadata={
+                "config": config.to_dict(),
+                "board_descriptor": adapter.board_descr,
+                "brainflow_version": adapter.brainflow_version,
+                "logs": logs,
+            },
+        )
+        print(f"\nSnapshot saved: {path}")
 
     return 0
 

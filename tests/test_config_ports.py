@@ -17,6 +17,13 @@ def test_invalid_gain_rejected():
         validate_config(config)
 
 
+def test_invalid_per_channel_gain_rejected():
+    config = AppConfig()
+    config.board.channel_gains[7] = 24
+    with pytest.raises(ValueError):
+        validate_config(config)
+
+
 def test_invalid_mouse_smoothing_rejected():
     config = AppConfig()
     config.mouse.smoothing = 1.0

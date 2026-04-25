@@ -1,7 +1,17 @@
 board:
   id: NEUROPAWN_KNIGHT_BOARD_IMU
   serial_port: /dev/cu.usbserial-A5069RR4
-  active_exg_channels: [1, 2, 3, 4]
+  active_exg_channels: [2]
+  rld_channels: [2]
+  channel_gains:
+    1: 12
+    2: 12
+    3: 12
+    4: 12
+    5: 12
+    6: 12
+    7: 12
+    8: 12
   gain: 12
   buffer_size: 450000
   configure_channels: true
@@ -9,10 +19,10 @@ board:
   config_command_delay_seconds: 0.5
 
 channel_map:
-  1: frontal_left
-  2: frontal_right
-  3: jaw_left
-  4: jaw_right
+  1: unused
+  2: jaw
+  3: unused
+  4: unused
 
 imu:
   use_magnetometer: false
@@ -29,3 +39,17 @@ mouse:
   smoothing: 0.35
   invert_x: false
   invert_y: false
+
+jaw:
+  channels: [2]
+  sampling_rate: 125.0
+  short_clench_seconds: 0.5
+  relax_seconds: 2.0
+  hold_seconds: 3.0
+  pre_event_seconds: 0.5
+  post_event_seconds: 0.8
+  short_clench_reps: 5
+  hold_reps: 3
+  profile_name: default
+  event_threshold: 0.70
+  hold_threshold: 0.70

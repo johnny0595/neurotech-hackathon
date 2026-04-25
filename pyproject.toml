@@ -25,6 +25,8 @@ dev = [
 [project.scripts]
 neuro-cursor = "neuro_cursor.app:main"
 neuro-smoke = "neuro_cursor.smoke:main"
+neuro-capture = "neuro_cursor.capture:main"
+neuro-train-jaw = "neuro_cursor.jaw_model:train_from_args"
 
 [build-system]
 requires = ["hatchling"]

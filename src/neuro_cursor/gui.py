@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QPlainTextEdit,
     QSplitter,
     QTableWidget,
@@ -30,6 +32,9 @@ from PySide6.QtWidgets import (
 
 from .brainflow_adapter import BoardConnectionError, KnightBrainFlowAdapter
 from .config import AppConfig, ImuConfig, MouseConfig, load_config
+from .diagnostics import active_exg_summary_text, write_snapshot
+from .jaw_calibration import GuidedJawCalibration
+from .jaw_model import JawPrediction, JawPredictor, train_profile
 from .mouse_control import MouseVelocity, QtCursorController
 from .orientation import OrientationEstimator
 from .recording import SessionRecorder
@@ -117,9 +122,19 @@ class DiagnosticsWindow(QMainWindow):
         self.latest_orientation = None
         self.connection_info: dict[str, object] = {}
         self._block_item = None
+        self.jaw_calibration: GuidedJawCalibration | None = None
+        self.jaw_predictor: JawPredictor | None = None
+        self.latest_jaw_prediction = JawPrediction(0.0, 0.0, "no_model")
+        self.jaw_event_count = 0
+        self.last_jaw_event_sample = -10_000_000
+        self.last_calibration_session: Path | None = None
+        self.channel_active_checks: dict[int, QCheckBox] = {}
+        self.channel_rld_checks: dict[int, QCheckBox] = {}
+        self.channel_gain_boxes: dict[int, QComboBox] = {}
 
         self.setWindowTitle("NeuroPawn Knight IMU Diagnostics")
         self.resize(1480, 980)
+        self._load_jaw_predictor()
         self._build_ui()
         self._apply_style()
 
@@ -162,9 +177,20 @@ class DiagnosticsWindow(QMainWindow):
         self.stop_button = QPushButton("Stop")
         self.stop_button.clicked.connect(self.stop_stream)
         self.stop_button.setEnabled(False)
-        self.record_button = QPushButton("Start Recording")
+        self.record_button = QPushButton("Start Jaw Recording")
         self.record_button.clicked.connect(self.toggle_recording)
         self.record_button.setEnabled(False)
+        self.record_label = QComboBox()
+        self.record_label.addItems(["neutral", "jaw_clench", "jaw_hold", "jaw_release", "test"])
+        self.record_label.setCurrentText("jaw_clench")
+        self.calibration_button = QPushButton("Start Jaw Calibration")
+        self.calibration_button.clicked.connect(self.start_jaw_calibration)
+        self.calibration_button.setEnabled(False)
+        self.train_jaw_button = QPushButton("Train Jaw Model")
+        self.train_jaw_button.clicked.connect(self.train_jaw_model)
+        self.capture_button = QPushButton("Capture Snapshot")
+        self.capture_button.clicked.connect(self.capture_snapshot)
+        self.capture_button.setEnabled(False)
         self.zero_button = QPushButton("Zero (level)")
         self.zero_button.clicked.connect(self.zero_orientation)
 
@@ -227,7 +253,12 @@ class DiagnosticsWindow(QMainWindow):
         for widget in (
             self.start_button,
             self.stop_button,
+            QLabel("Label"),
+            self.record_label,
             self.record_button,
+            self.calibration_button,
+            self.train_jaw_button,
+            self.capture_button,
             self.zero_button,
             self.mag_checkbox,
             QLabel("Gyro units"),
@@ -257,7 +288,8 @@ class DiagnosticsWindow(QMainWindow):
         layout.setSpacing(8)
 
         layout.addWidget(self._build_status_box())
-        layout.addWidget(self._build_plot_box("EXG channels 1-4", "exg"))
+        layout.addWidget(self._build_plot_box("EXG Data", "exg"), 3)
+        layout.addWidget(self._build_frequency_box(), 2)
         layout.addWidget(self._build_plot_box("Accel / Gyro / Mag", "imu"), 1)
         return panel
 
@@ -269,9 +301,12 @@ class DiagnosticsWindow(QMainWindow):
         self.rate_label = QLabel("0.0 Hz")
         self.packet_label = QLabel("0")
         self.loff_label = QLabel("P: --  N: --")
+        self.exg_health_label = QLabel("EXG --")
         self.euler_label = QLabel("roll 0.0  pitch 0.0  yaw 0.0")
         self.raw_euler_label = QLabel("raw roll 0.0  pitch 0.0  yaw 0.0")
         self.cursor_label = QLabel("disarmed")
+        self.jaw_preview_label = QLabel("jaw model not loaded")
+        self.calibration_label = QLabel("calibration idle")
         self.backend_label = QLabel(self.estimator.backend)
 
         rows = [
@@ -280,9 +315,12 @@ class DiagnosticsWindow(QMainWindow):
             ("Packets", self.packet_label),
             ("Rate", self.rate_label),
             ("LOFF", self.loff_label),
+            ("EXG", self.exg_health_label),
             ("Corrected", self.euler_label),
             ("Raw", self.raw_euler_label),
             ("Cursor", self.cursor_label),
+            ("Jaw", self.jaw_preview_label),
+            ("Calibration", self.calibration_label),
             ("Orientation", self.backend_label),
         ]
         for index, (label, widget) in enumerate(rows):
@@ -296,12 +334,17 @@ class DiagnosticsWindow(QMainWindow):
         if kind == "exg":
             self.exg_plot = pg.PlotWidget()
             self.exg_plot.setLabel("bottom", "seconds")
-            self.exg_plot.setLabel("left", "uV")
-            self.exg_plot.addLegend(offset=(8, 8))
-            colors = ["#e15b64", "#4aa3df", "#7bc96f", "#d7b84f"]
+            self.exg_plot.setLabel("left", "channel")
+            self.exg_plot.showGrid(x=True, y=False, alpha=0.16)
+            self.exg_plot.setMouseEnabled(x=False, y=False)
+            self.exg_plot.hideButtons()
             self.exg_curves = []
-            for idx, row in enumerate(EXG_ROWS[:4]):
-                curve = self.exg_plot.plot(pen=pg.mkPen(colors[idx], width=1.4), name=f"EXG {row}")
+            self.exg_offsets = {row: float(len(EXG_ROWS) - idx) for idx, row in enumerate(EXG_ROWS)}
+            ticks = [(offset, f"Ch {row}") for row, offset in self.exg_offsets.items()]
+            self.exg_plot.getAxis("left").setTicks([ticks])
+            self.exg_plot.setYRange(0.35, len(EXG_ROWS) + 0.65)
+            for row in EXG_ROWS:
+                curve = self.exg_plot.plot(pen=pg.mkPen("#cfd4d8", width=0.8), name=f"Ch {row}")
                 self.exg_curves.append((row, curve))
             layout.addWidget(self.exg_plot)
         else:
@@ -316,6 +359,33 @@ class DiagnosticsWindow(QMainWindow):
                 "gyro": self._add_xyz_curves(self.gyro_plot, GYRO_ROWS),
                 "mag": self._add_xyz_curves(self.mag_plot, MAG_ROWS),
             }
+        return box
+
+    def _build_frequency_box(self) -> QGroupBox:
+        box = QGroupBox("Frequency Analysis of Active Channels")
+        layout = QVBoxLayout(box)
+        self.freq_plot = pg.PlotWidget()
+        self.freq_plot.setLabel("bottom", "frequency", "Hz")
+        self.freq_plot.setLabel("left", "amplitude")
+        self.freq_plot.showGrid(x=True, y=True, alpha=0.18)
+        self.freq_plot.setMouseEnabled(x=False, y=False)
+        self.freq_plot.hideButtons()
+        self.freq_plot.setXRange(0, 60)
+        colors = [
+            "#d7dee3",
+            "#9ca7ae",
+            "#7f8b93",
+            "#b8c1c7",
+            "#e1e6ea",
+            "#8d979e",
+            "#c6ced3",
+            "#aab4ba",
+        ]
+        self.freq_curves = {
+            row: self.freq_plot.plot(pen=pg.mkPen(colors[idx], width=1.0), name=f"Ch {row}")
+            for idx, row in enumerate(EXG_ROWS)
+        }
+        layout.addWidget(self.freq_plot)
         return box
 
     def _make_imu_plot(self, title: str) -> pg.PlotWidget:
@@ -339,9 +409,56 @@ class DiagnosticsWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addWidget(self._build_gl_box(), 2)
+        layout.addWidget(self._build_channel_controls_box(), 4)
         layout.addWidget(self._build_table_box(), 3)
         layout.addWidget(self._build_log_box(), 2)
         return panel
+
+    def _build_channel_controls_box(self) -> QGroupBox:
+        box = QGroupBox("EXG Channels")
+        outer = QVBoxLayout(box)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        layout = QGridLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(5)
+
+        layout.addWidget(QLabel("Channel"), 0, 0)
+        layout.addWidget(QLabel("Active"), 0, 1)
+        layout.addWidget(QLabel("Route RLD"), 0, 2)
+        layout.addWidget(QLabel("Gain"), 0, 3)
+        active = set(self.config.board.active_exg_channels)
+        rld = set(self.config.board.rld_channels)
+        for channel in EXG_ROWS:
+            active_check = QCheckBox()
+            active_check.setChecked(channel in active)
+            active_check.stateChanged.connect(self._channel_controls_changed)
+            rld_check = QCheckBox()
+            rld_check.setChecked(channel in rld)
+            rld_check.stateChanged.connect(self._channel_controls_changed)
+            gain_box = QComboBox()
+            gain_box.addItems(["1", "2", "3", "4", "6", "8", "12"])
+            gain_box.setCurrentText(str(self.config.board.channel_gains.get(channel, self.config.board.gain)))
+            gain_box.currentTextChanged.connect(self._channel_controls_changed)
+
+            self.channel_active_checks[channel] = active_check
+            self.channel_rld_checks[channel] = rld_check
+            self.channel_gain_boxes[channel] = gain_box
+            row = channel
+            layout.addWidget(QLabel(f"Channel {channel}"), row, 0)
+            layout.addWidget(active_check, row, 1)
+            layout.addWidget(rld_check, row, 2)
+            layout.addWidget(gain_box, row, 3)
+
+        self.apply_channels_button = QPushButton("Apply On Restart")
+        self.apply_channels_button.setEnabled(False)
+        layout.addWidget(self.apply_channels_button, 9, 0, 1, 4)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        return box
 
     def _build_gl_box(self) -> QGroupBox:
         box = QGroupBox("Orientation")
@@ -459,6 +576,8 @@ class DiagnosticsWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.record_button.setEnabled(True)
+        self.calibration_button.setEnabled(True)
+        self.capture_button.setEnabled(True)
 
     @Slot()
     def stop_stream(self) -> None:
@@ -466,7 +585,10 @@ class DiagnosticsWindow(QMainWindow):
         if self.worker is not None:
             self.worker.stop()
         if self.recorder.is_recording:
-            self.toggle_recording()
+            if self.jaw_calibration is not None:
+                self._finish_jaw_calibration(cancelled=True)
+            else:
+                self.toggle_recording()
         self.state_label.setText("stopping")
 
     @Slot(object)
@@ -490,6 +612,8 @@ class DiagnosticsWindow(QMainWindow):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.record_button.setEnabled(False)
+        self.calibration_button.setEnabled(False)
+        self.capture_button.setEnabled(False)
         self.thread = None
         self.worker = None
 
@@ -506,6 +630,7 @@ class DiagnosticsWindow(QMainWindow):
         if orientation_samples:
             self.latest_orientation = orientation_samples[-1]
         self.recorder.append(batch, orientation_samples)
+        self._update_jaw_calibration()
 
     @Slot()
     def toggle_recording(self) -> None:
@@ -515,15 +640,122 @@ class DiagnosticsWindow(QMainWindow):
                 "config_path": self.config_path,
                 "connection": self.connection_info,
                 "row_map": ROW_LABELS,
+                "gesture": "jaw",
+                "label": self.record_label.currentText(),
+                "active_exg_channels": list(self.config.board.active_exg_channels),
             }
             path = self.recorder.start(metadata)
-            self.record_button.setText("Stop Recording")
-            self._log(f"Recording started: {path}")
+            self.record_button.setText("Stop Jaw Recording")
+            self.record_label.setEnabled(False)
+            self.calibration_button.setEnabled(False)
+            self._log(f"Jaw recording started: {path} label={self.record_label.currentText()}")
             return
 
         path = self.recorder.stop()
-        self.record_button.setText("Start Recording")
-        self._log(f"Recording saved: {path}")
+        self.record_button.setText("Start Jaw Recording")
+        self.record_label.setEnabled(True)
+        self.calibration_button.setEnabled(True)
+        self._log(f"Jaw recording saved: {path}")
+
+    @Slot()
+    def start_jaw_calibration(self) -> None:
+        if self.thread is None or self.state_label.text() != "streaming":
+            self._log("Jaw calibration requires an active stream")
+            return
+        if self.recorder.is_recording:
+            self._log("Stop the current recording before starting jaw calibration")
+            return
+        self.jaw_calibration = GuidedJawCalibration(self.config.jaw)
+        self.jaw_calibration.start(0)
+        metadata = {
+            "config": self.config.to_dict(),
+            "config_path": self.config_path,
+            "connection": self.connection_info,
+            "row_map": ROW_LABELS,
+            "gesture": "jaw",
+            "label": "jaw_guided_calibration",
+            "active_exg_channels": list(self.config.jaw.channels),
+            "prompt_schedule": [phase.__dict__ for phase in self.jaw_calibration.schedule],
+        }
+        path = self.recorder.start(metadata)
+        self.record_button.setEnabled(False)
+        self.record_label.setEnabled(False)
+        self.calibration_button.setEnabled(False)
+        self.calibration_label.setText(self.jaw_calibration.prompt_text(0))
+        self._log(f"Jaw calibration started: {path}")
+
+    @Slot()
+    def train_jaw_model(self) -> None:
+        session = self.last_calibration_session
+        if session is None:
+            self._log("No guided calibration session available to train")
+            return
+        self._train_and_load_jaw_model(session)
+
+    @Slot()
+    def capture_snapshot(self) -> None:
+        if self.buffer.shape[1] == 0:
+            self._log("Snapshot skipped: no stream samples yet")
+            return
+        metadata = {
+            "config": self.config.to_dict(),
+            "config_path": self.config_path,
+            "connection": self.connection_info,
+            "row_map": ROW_LABELS,
+        }
+        path = write_snapshot(
+            self.buffer[:, -250:],
+            self.config.board.active_exg_channels,
+            metadata=metadata,
+        )
+        self._log(f"Snapshot saved: {path}")
+
+    def _update_jaw_calibration(self) -> None:
+        if self.jaw_calibration is None or not self.recorder.is_recording:
+            return
+        sample_count = self.recorder.sample_count
+        labels = [label.to_dict() for label in self.jaw_calibration.update(sample_count)]
+        if labels:
+            self.recorder.add_labels(labels)
+            for label in labels:
+                if label.get("type") == "event":
+                    self._log(f"Jaw label: {label['label']} sample={label.get('sample')}")
+        self.calibration_label.setText(self.jaw_calibration.prompt_text(sample_count))
+        if self.jaw_calibration.finished:
+            self._finish_jaw_calibration(cancelled=False)
+
+    def _finish_jaw_calibration(self, cancelled: bool) -> None:
+        if not self.recorder.is_recording:
+            self.jaw_calibration = None
+            return
+        path = self.recorder.stop()
+        self.last_calibration_session = path
+        self.jaw_calibration = None
+        self.record_button.setEnabled(True)
+        self.record_label.setEnabled(True)
+        self.calibration_button.setEnabled(True)
+        self.calibration_label.setText("calibration cancelled" if cancelled else "calibration complete")
+        self._log(f"Jaw calibration saved: {path}")
+        if not cancelled and path is not None:
+            self._train_and_load_jaw_model(path)
+
+    def _train_and_load_jaw_model(self, session: Path) -> None:
+        try:
+            profile = train_profile([session], self.config)
+            self.jaw_predictor = JawPredictor.load(profile, self.config.jaw)
+            self.jaw_event_count = 0
+            self.last_jaw_event_sample = -10_000_000
+            self._log(f"Jaw model trained: {profile}")
+        except Exception as exc:
+            self._log(f"Jaw model training failed: {exc}")
+
+    def _load_jaw_predictor(self) -> None:
+        profile = Path("models") / self.config.jaw.profile_name
+        try:
+            self.jaw_predictor = JawPredictor.load(profile, self.config.jaw)
+            self.latest_jaw_prediction = JawPrediction(0.0, 0.0, "relaxed")
+        except Exception:
+            self.jaw_predictor = None
 
     @Slot()
     def zero_orientation(self) -> None:
@@ -542,6 +774,35 @@ class DiagnosticsWindow(QMainWindow):
         )
         self.estimator.update_config(self.config.imu)
         self.backend_label.setText(self.estimator.backend)
+
+    @Slot()
+    def _channel_controls_changed(self) -> None:
+        active = [
+            channel
+            for channel, checkbox in self.channel_active_checks.items()
+            if checkbox.isChecked()
+        ]
+        rld = [
+            channel
+            for channel, checkbox in self.channel_rld_checks.items()
+            if checkbox.isChecked()
+        ]
+        gains = {
+            channel: int(box.currentText()) for channel, box in self.channel_gain_boxes.items()
+        }
+        self.config.board.active_exg_channels = active
+        self.config.board.rld_channels = rld
+        self.config.board.channel_gains = gains
+        if not active:
+            self.apply_channels_button.setText("Select at least one channel")
+            self.apply_channels_button.setEnabled(False)
+            return
+        if self.thread is not None:
+            self.apply_channels_button.setText("Restart stream to apply")
+            self.apply_channels_button.setEnabled(True)
+        else:
+            self.apply_channels_button.setText("Ready for next stream")
+            self.apply_channels_button.setEnabled(False)
 
     @Slot()
     def _mouse_controls_changed(self) -> None:
@@ -623,6 +884,7 @@ class DiagnosticsWindow(QMainWindow):
             )
         else:
             self.cursor_label.setText("disarmed")
+        self._refresh_jaw_preview()
 
         if self.buffer.shape[1] == 0:
             return
@@ -631,6 +893,9 @@ class DiagnosticsWindow(QMainWindow):
         p_bits = loff_bits(latest[LOFF_STATP_ROW])
         n_bits = loff_bits(latest[LOFF_STATN_ROW])
         self.loff_label.setText(f"P: {p_bits or 'clear'}  N: {n_bits or 'clear'}")
+        self.exg_health_label.setText(
+            active_exg_summary_text(self.buffer, self.config.board.active_exg_channels)
+        )
 
         if self.latest_orientation is not None:
             sample = self.latest_orientation
@@ -644,6 +909,30 @@ class DiagnosticsWindow(QMainWindow):
 
         self._refresh_table()
         self._refresh_plots()
+
+    def _refresh_jaw_preview(self) -> None:
+        if self.jaw_predictor is None:
+            self.jaw_preview_label.setText("model not loaded")
+            return
+        needed = max(2, int(round(self.config.jaw.short_clench_seconds * self.config.jaw.sampling_rate)))
+        if self.buffer.shape[1] < needed:
+            self.jaw_preview_label.setText("waiting for jaw samples")
+            return
+        self.latest_jaw_prediction = self.jaw_predictor.predict(self.buffer)
+        current_sample = self.total_packets
+        refractory = int(round(self.config.jaw.sampling_rate))
+        if (
+            self.latest_jaw_prediction.event_confidence >= self.config.jaw.event_threshold
+            and current_sample - self.last_jaw_event_sample >= refractory
+        ):
+            self.jaw_event_count += 1
+            self.last_jaw_event_sample = current_sample
+        self.jaw_preview_label.setText(
+            f"{self.latest_jaw_prediction.state}  "
+            f"event {self.latest_jaw_prediction.event_confidence:.2f}  "
+            f"hold {self.latest_jaw_prediction.hold_confidence:.2f}  "
+            f"count {self.jaw_event_count}"
+        )
 
     def _refresh_table(self) -> None:
         for stat in row_stats(self.buffer[:, -250:]):
@@ -668,11 +957,42 @@ class DiagnosticsWindow(QMainWindow):
         data = self.buffer[:, -self.max_buffer_samples :]
         n = data.shape[1]
         x = (np.arange(n) - n + 1) / SAMPLING_RATE_HZ
+        active = set(self.config.board.active_exg_channels)
         for row, curve in self.exg_curves:
-            curve.setData(x, data[row])
+            curve.setPen(pg.mkPen("#d7dee3" if row in active else "#4f5559", width=0.9))
+            curve.setData(x, self._stacked_exg_trace(data[row], self.exg_offsets[row]))
         for group in self.imu_curves.values():
             for row, curve in group:
                 curve.setData(x, data[row])
+        self._refresh_frequency_plot(data)
+
+    def _stacked_exg_trace(self, values: np.ndarray, offset: float) -> np.ndarray:
+        if values.size == 0:
+            return values
+        centered = values - np.median(values)
+        scale = float(np.percentile(np.abs(centered), 95)) if centered.size else 1.0
+        scale = max(scale, 1.0)
+        return centered / scale * 0.36 + offset
+
+    def _refresh_frequency_plot(self, data: np.ndarray) -> None:
+        n = data.shape[1]
+        if n < 16:
+            for curve in self.freq_curves.values():
+                curve.setData([], [])
+            return
+        active = set(self.config.board.active_exg_channels)
+        window_size = min(n, SAMPLING_RATE_HZ * 4)
+        segment = data[:, -window_size:]
+        freq = np.fft.rfftfreq(window_size, d=1.0 / SAMPLING_RATE_HZ)
+        keep = freq <= 60.0
+        taper = np.hanning(window_size)
+        for row, curve in self.freq_curves.items():
+            if row not in active:
+                curve.setData([], [])
+                continue
+            values = segment[row] - np.mean(segment[row])
+            spectrum = np.abs(np.fft.rfft(values * taper)) / max(window_size, 1)
+            curve.setData(freq[keep], spectrum[keep] / 1_000_000.0)
 
     def _wireframe_points(self, q: np.ndarray) -> np.ndarray:
         vertices = np.array(

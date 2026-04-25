@@ -20,6 +20,21 @@ class BoardConnectionError(RuntimeError):
     pass
 
 
+def channel_config_commands(config: AppConfig) -> list[str]:
+    active = set(int(channel) for channel in config.board.active_exg_channels)
+    rld = set(int(channel) for channel in config.board.rld_channels)
+    commands: list[str] = []
+    for channel in range(1, 9):
+        if channel in active:
+            gain = int(config.board.channel_gains.get(channel, config.board.gain))
+            commands.append(f"chon_{channel}_{gain}")
+            commands.append(f"rldadd_{channel}" if channel in rld else f"rldremove_{channel}")
+        else:
+            commands.append(f"rldremove_{channel}")
+            commands.append(f"choff_{channel}")
+    return commands
+
+
 class KnightBrainFlowAdapter:
     """Owns BrainFlow session lifecycle for the Knight IMU board."""
 
@@ -85,14 +100,8 @@ class KnightBrainFlowAdapter:
                 f"Waiting {self.config.board.stream_settle_seconds:.1f}s before channel configuration"
             )
             time.sleep(self.config.board.stream_settle_seconds)
-        active = set(self.config.board.active_exg_channels)
-        for channel in sorted(active):
-            self._config_board(f"chon_{channel}_{self.config.board.gain}")
-            self._config_board(f"rldadd_{channel}")
-        for channel in range(1, 9):
-            if channel in active:
-                continue
-            self._config_board(f"choff_{channel}")
+        for command in channel_config_commands(self.config):
+            self._config_board(command)
 
     def _config_board(self, command: str) -> None:
         if self.board is None:

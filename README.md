@@ -17,6 +17,9 @@ port is not present, the app searches likely USB serial ports and fails clearly
 when no board is connected. Windows users should set `board.serial_port` to
 their COM port, for example `COM3`.
 
+The current EXG default is the two-sensor jaw setup: channels `1` and `2` are
+active and routed to RLD at gain `12`.
+
 ## Cursor Control
 
 Cursor movement is intentionally GUI-only and defaults to disarmed. Start the
@@ -33,6 +36,44 @@ the pointer only; it does not click or drag.
 On macOS, grant the terminal or app used to launch `uv run neuro-cursor`
 Accessibility permission in System Settings > Privacy & Security > Accessibility
 if pointer control is blocked or unreliable.
+
+## EXG Visualizer
+
+The GUI has a NeuroPawn-style EXG panel:
+
+- stacked traces for rows `1-8`
+- frequency analysis for the active channels
+- per-channel `Active`, `Route RLD`, and `Gain` controls
+- `Capture Snapshot`, which writes row stats and active-channel status to
+  `data/snapshots/`
+
+Channel-control changes apply on the next stream start. If you change channels
+while streaming, stop and start the stream so the app can resend `chon_*`,
+`rldadd_*` or `rldremove_*`, and `choff_*` commands.
+
+## Jaw Data Recording
+
+Use the GUI `Label` control and `Start Jaw Recording` button to record labeled
+examples for `neutral`, `jaw_clench`, `jaw_hold`, or `jaw_release`. Each saved
+session includes:
+
+- `raw.npz`: full 22-row BrainFlow data
+- `exg.csv`: 8 EXG columns, compatible with NeuroPawn visualizer-style CSVs
+- `labels.jsonl`: the selected jaw label and sample range
+- `features.json`: EXG RMS, peak-to-peak, slope, packet gaps, and rate
+- `metadata.json`: config, row map, active EXG channels, and connection info
+
+For terminal captures:
+
+```bash
+uv run neuro-capture --config config/neuro_cursor.yaml --seconds 10 --label jaw_clench
+```
+
+To import an 8-column EXG CSV:
+
+```bash
+uv run neuro-capture --config config/neuro_cursor.yaml --from-csv /path/to/recording.csv --label jaw_clench
+```
 
 ## BrainFlow Knight IMU Rows
 
