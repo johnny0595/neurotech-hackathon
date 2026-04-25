@@ -20,9 +20,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QPlainTextEdit,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -35,12 +36,12 @@ from .config import AppConfig, ImuConfig, MouseConfig, load_config
 from .diagnostics import active_exg_summary_text, write_snapshot
 from .jaw_calibration import GuidedJawCalibration
 from .jaw_model import JawPrediction, JawPredictor, train_profile
+from .jaw_eval import discover_usable_sessions, train_and_evaluate_profile
 from .mouse_control import MouseVelocity, QtCursorController
 from .orientation import OrientationEstimator
 from .recording import SessionRecorder
 from .rows import (
     ACCEL_ROWS,
-    EXG_ROWS,
     GYRO_ROWS,
     LOFF_STATN_ROW,
     LOFF_STATP_ROW,
@@ -124,13 +125,14 @@ class DiagnosticsWindow(QMainWindow):
         self._block_item = None
         self.jaw_calibration: GuidedJawCalibration | None = None
         self.jaw_predictor: JawPredictor | None = None
-        self.latest_jaw_prediction = JawPrediction(0.0, 0.0, "no_model")
+        self.latest_jaw_prediction = JawPrediction(0.0, "no_model")
         self.jaw_event_count = 0
         self.last_jaw_event_sample = -10_000_000
         self.last_calibration_session: Path | None = None
         self.channel_active_checks: dict[int, QCheckBox] = {}
         self.channel_rld_checks: dict[int, QCheckBox] = {}
         self.channel_gain_boxes: dict[int, QComboBox] = {}
+        self.jaw_exg_rows = tuple(int(channel) for channel in (self.config.jaw.channels or [2]))
 
         self.setWindowTitle("NeuroPawn Knight IMU Diagnostics")
         self.resize(1480, 980)
@@ -157,12 +159,15 @@ class DiagnosticsWindow(QMainWindow):
 
         root_layout.addWidget(self._build_top_bar())
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self._build_left_panel())
-        splitter.addWidget(self._build_right_panel())
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        root_layout.addWidget(splitter, 1)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(10)
+        self.main_splitter.addWidget(self._build_left_panel())
+        self.main_splitter.addWidget(self._build_right_scroll_panel())
+        self.main_splitter.setStretchFactor(0, 5)
+        self.main_splitter.setStretchFactor(1, 2)
+        self.main_splitter.setSizes([1120, 520])
+        root_layout.addWidget(self.main_splitter, 1)
 
         self.setCentralWidget(root)
 
@@ -181,13 +186,15 @@ class DiagnosticsWindow(QMainWindow):
         self.record_button.clicked.connect(self.toggle_recording)
         self.record_button.setEnabled(False)
         self.record_label = QComboBox()
-        self.record_label.addItems(["neutral", "jaw_clench", "jaw_hold", "jaw_release", "test"])
+        self.record_label.addItems(["neutral", "jaw_clench", "test"])
         self.record_label.setCurrentText("jaw_clench")
         self.calibration_button = QPushButton("Start Jaw Calibration")
         self.calibration_button.clicked.connect(self.start_jaw_calibration)
         self.calibration_button.setEnabled(False)
         self.train_jaw_button = QPushButton("Train Jaw Model")
         self.train_jaw_button.clicked.connect(self.train_jaw_model)
+        self.qa_jaw_button = QPushButton("Jaw Model QA")
+        self.qa_jaw_button.clicked.connect(self.run_jaw_model_qa)
         self.capture_button = QPushButton("Capture Snapshot")
         self.capture_button.clicked.connect(self.capture_snapshot)
         self.capture_button.setEnabled(False)
@@ -253,33 +260,72 @@ class DiagnosticsWindow(QMainWindow):
         for widget in (
             self.start_button,
             self.stop_button,
-            QLabel("Label"),
-            self.record_label,
-            self.record_button,
-            self.calibration_button,
-            self.train_jaw_button,
             self.capture_button,
             self.zero_button,
-            self.mag_checkbox,
-            QLabel("Gyro units"),
-            self.gyro_units,
-            QLabel("Beta"),
-            self.beta_spin,
-            QLabel("Pivot Z"),
-            self.pivot_spin,
-            self.swap_checkbox,
-            self.invert_checkbox,
-            self.arm_cursor_button,
-            QLabel("Cursor DZ"),
-            self.cursor_dead_zone_spin,
-            QLabel("Cursor speed"),
-            self.cursor_speed_spin,
-            self.cursor_invert_x_checkbox,
-            self.cursor_invert_y_checkbox,
         ):
             layout.addWidget(widget)
         layout.addStretch(1)
         return bar
+
+    def _build_controls_box(self) -> QGroupBox:
+        box = QGroupBox("Controls")
+        layout = QGridLayout(box)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
+
+        layout.addWidget(QLabel("Jaw label"), 0, 0)
+        layout.addWidget(self.record_label, 0, 1)
+        layout.addWidget(self.record_button, 1, 0, 1, 2)
+        layout.addWidget(self.calibration_button, 2, 0)
+        layout.addWidget(self.train_jaw_button, 2, 1)
+        layout.addWidget(self.qa_jaw_button, 3, 0, 1, 2)
+
+        layout.addWidget(self.mag_checkbox, 4, 0, 1, 2)
+        layout.addWidget(QLabel("Gyro units"), 5, 0)
+        layout.addWidget(self.gyro_units, 5, 1)
+        layout.addWidget(QLabel("Beta"), 6, 0)
+        layout.addWidget(self.beta_spin, 6, 1)
+        layout.addWidget(QLabel("Pivot Z"), 7, 0)
+        layout.addWidget(self.pivot_spin, 7, 1)
+        layout.addWidget(self.swap_checkbox, 8, 0)
+        layout.addWidget(self.invert_checkbox, 8, 1)
+
+        layout.addWidget(self.arm_cursor_button, 9, 0, 1, 2)
+        layout.addWidget(QLabel("Cursor DZ"), 10, 0)
+        layout.addWidget(self.cursor_dead_zone_spin, 10, 1)
+        layout.addWidget(QLabel("Cursor speed"), 11, 0)
+        layout.addWidget(self.cursor_speed_spin, 11, 1)
+        layout.addWidget(self.cursor_invert_x_checkbox, 12, 0)
+        layout.addWidget(self.cursor_invert_y_checkbox, 12, 1)
+        for widget in (
+            self.record_button,
+            self.calibration_button,
+            self.train_jaw_button,
+            self.qa_jaw_button,
+            self.arm_cursor_button,
+            self.record_label,
+            self.gyro_units,
+            self.beta_spin,
+            self.pivot_spin,
+            self.cursor_dead_zone_spin,
+            self.cursor_speed_spin,
+        ):
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        return box
+
+    def _build_calibration_prompt_box(self) -> QGroupBox:
+        box = QGroupBox("Jaw Calibration Prompt")
+        layout = QVBoxLayout(box)
+        self.calibration_prompt_label = QLabel("Start a jaw calibration when the stream is running.")
+        self.calibration_prompt_label.setWordWrap(True)
+        self.calibration_prompt_label.setAlignment(Qt.AlignCenter)
+        self.calibration_prompt_label.setMinimumHeight(86)
+        self.calibration_prompt_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.calibration_prompt_label.setObjectName("calibrationPrompt")
+        layout.addWidget(self.calibration_prompt_label)
+        return box
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
@@ -288,6 +334,7 @@ class DiagnosticsWindow(QMainWindow):
         layout.setSpacing(8)
 
         layout.addWidget(self._build_status_box())
+        layout.addWidget(self._build_calibration_prompt_box())
         layout.addWidget(self._build_plot_box("EXG Data", "exg"), 3)
         layout.addWidget(self._build_frequency_box(), 2)
         layout.addWidget(self._build_plot_box("Accel / Gyro / Mag", "imu"), 1)
@@ -334,17 +381,18 @@ class DiagnosticsWindow(QMainWindow):
         if kind == "exg":
             self.exg_plot = pg.PlotWidget()
             self.exg_plot.setLabel("bottom", "seconds")
-            self.exg_plot.setLabel("left", "channel")
+            self.exg_plot.setLabel("left", "EEG 2")
             self.exg_plot.showGrid(x=True, y=False, alpha=0.16)
             self.exg_plot.setMouseEnabled(x=False, y=False)
             self.exg_plot.hideButtons()
             self.exg_curves = []
-            self.exg_offsets = {row: float(len(EXG_ROWS) - idx) for idx, row in enumerate(EXG_ROWS)}
-            ticks = [(offset, f"Ch {row}") for row, offset in self.exg_offsets.items()]
+            rows = self.jaw_exg_rows
+            self.exg_offsets = {row: float(len(rows) - idx) for idx, row in enumerate(rows)}
+            ticks = [(offset, f"EEG {row}") for row, offset in self.exg_offsets.items()]
             self.exg_plot.getAxis("left").setTicks([ticks])
-            self.exg_plot.setYRange(0.35, len(EXG_ROWS) + 0.65)
-            for row in EXG_ROWS:
-                curve = self.exg_plot.plot(pen=pg.mkPen("#cfd4d8", width=0.8), name=f"Ch {row}")
+            self.exg_plot.setYRange(0.35, len(rows) + 0.65)
+            for row in rows:
+                curve = self.exg_plot.plot(pen=pg.mkPen("#d7dee3", width=1.2), name=f"EEG {row}")
                 self.exg_curves.append((row, curve))
             layout.addWidget(self.exg_plot)
         else:
@@ -382,8 +430,8 @@ class DiagnosticsWindow(QMainWindow):
             "#aab4ba",
         ]
         self.freq_curves = {
-            row: self.freq_plot.plot(pen=pg.mkPen(colors[idx], width=1.0), name=f"Ch {row}")
-            for idx, row in enumerate(EXG_ROWS)
+            row: self.freq_plot.plot(pen=pg.mkPen(colors[idx % len(colors)], width=1.2), name=f"EEG {row}")
+            for idx, row in enumerate(self.jaw_exg_rows)
         }
         layout.addWidget(self.freq_plot)
         return box
@@ -403,61 +451,69 @@ class DiagnosticsWindow(QMainWindow):
             curves.append((row, plot.plot(pen=pg.mkPen(colors[idx], width=1.2), name=labels[idx])))
         return curves
 
+    def _build_right_scroll_panel(self) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(440)
+        scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        scroll.setWidget(self._build_right_panel())
+        return scroll
+
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setMinimumWidth(420)
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addWidget(self._build_gl_box(), 2)
+        layout.addWidget(self._build_controls_box(), 1)
         layout.addWidget(self._build_channel_controls_box(), 4)
         layout.addWidget(self._build_table_box(), 3)
         layout.addWidget(self._build_log_box(), 2)
         return panel
 
     def _build_channel_controls_box(self) -> QGroupBox:
-        box = QGroupBox("EXG Channels")
-        outer = QVBoxLayout(box)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        content = QWidget()
-        layout = QGridLayout(content)
-        layout.setContentsMargins(0, 0, 0, 0)
+        box = QGroupBox("Jaw EEG Channel")
+        layout = QGridLayout(box)
         layout.setHorizontalSpacing(8)
-        layout.setVerticalSpacing(5)
+        layout.setVerticalSpacing(6)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(2, 1)
 
-        layout.addWidget(QLabel("Channel"), 0, 0)
-        layout.addWidget(QLabel("Active"), 0, 1)
-        layout.addWidget(QLabel("Route RLD"), 0, 2)
-        layout.addWidget(QLabel("Gain"), 0, 3)
+        channel = self.jaw_exg_rows[0]
         active = set(self.config.board.active_exg_channels)
         rld = set(self.config.board.rld_channels)
-        for channel in EXG_ROWS:
-            active_check = QCheckBox()
-            active_check.setChecked(channel in active)
-            active_check.stateChanged.connect(self._channel_controls_changed)
-            rld_check = QCheckBox()
-            rld_check.setChecked(channel in rld)
-            rld_check.stateChanged.connect(self._channel_controls_changed)
-            gain_box = QComboBox()
-            gain_box.addItems(["1", "2", "3", "4", "6", "8", "12"])
-            gain_box.setCurrentText(str(self.config.board.channel_gains.get(channel, self.config.board.gain)))
-            gain_box.currentTextChanged.connect(self._channel_controls_changed)
+        active_check = QCheckBox("Active")
+        active_check.setChecked(channel in active)
+        active_check.setEnabled(False)
+        active_check.stateChanged.connect(self._channel_controls_changed)
+        rld_check = QCheckBox("Route RLD")
+        rld_check.setChecked(channel in rld)
+        rld_check.stateChanged.connect(self._channel_controls_changed)
+        gain_box = QComboBox()
+        gain_box.addItems(["1", "2", "3", "4", "6", "8", "12"])
+        gain_box.setCurrentText(str(self.config.board.channel_gains.get(channel, self.config.board.gain)))
+        gain_box.currentTextChanged.connect(self._channel_controls_changed)
 
-            self.channel_active_checks[channel] = active_check
-            self.channel_rld_checks[channel] = rld_check
-            self.channel_gain_boxes[channel] = gain_box
-            row = channel
-            layout.addWidget(QLabel(f"Channel {channel}"), row, 0)
-            layout.addWidget(active_check, row, 1)
-            layout.addWidget(rld_check, row, 2)
-            layout.addWidget(gain_box, row, 3)
+        self.channel_active_checks[channel] = active_check
+        self.channel_rld_checks[channel] = rld_check
+        self.channel_gain_boxes[channel] = gain_box
+
+        channel_label = QLabel(f"EEG channel {channel} feeds jaw clench detection.")
+        channel_label.setWordWrap(True)
+        layout.addWidget(channel_label, 0, 0, 1, 3)
+        layout.addWidget(active_check, 1, 0)
+        layout.addWidget(rld_check, 1, 1)
+        layout.addWidget(QLabel("Gain"), 2, 0)
+        layout.addWidget(gain_box, 2, 1)
 
         self.apply_channels_button = QPushButton("Apply On Restart")
         self.apply_channels_button.setEnabled(False)
-        layout.addWidget(self.apply_channels_button, 9, 0, 1, 4)
-        scroll.setWidget(content)
-        outer.addWidget(scroll)
+        layout.addWidget(self.apply_channels_button, 3, 0, 1, 3)
         return box
 
     def _build_gl_box(self) -> QGroupBox:
@@ -530,6 +586,15 @@ class DiagnosticsWindow(QMainWindow):
             }
             QPushButton:hover { background: #2e373d; }
             QPushButton:disabled { color: #67717a; }
+            QLabel#calibrationPrompt {
+                background: #0d1012;
+                border: 1px solid #374149;
+                border-radius: 6px;
+                color: #f4f7f8;
+                font-size: 24px;
+                font-weight: 700;
+                padding: 16px;
+            }
             QTableWidget {
                 background: #151a1d;
                 alternate-background-color: #101416;
@@ -682,6 +747,7 @@ class DiagnosticsWindow(QMainWindow):
         self.record_label.setEnabled(False)
         self.calibration_button.setEnabled(False)
         self.calibration_label.setText(self.jaw_calibration.prompt_text(0))
+        self._set_calibration_prompt(self.jaw_calibration.prompt_text(0), active=True)
         self._log(f"Jaw calibration started: {path}")
 
     @Slot()
@@ -720,7 +786,9 @@ class DiagnosticsWindow(QMainWindow):
             for label in labels:
                 if label.get("type") == "event":
                     self._log(f"Jaw label: {label['label']} sample={label.get('sample')}")
-        self.calibration_label.setText(self.jaw_calibration.prompt_text(sample_count))
+        prompt = self.jaw_calibration.prompt_text(sample_count)
+        self.calibration_label.setText(prompt)
+        self._set_calibration_prompt(prompt, active=True)
         if self.jaw_calibration.finished:
             self._finish_jaw_calibration(cancelled=False)
 
@@ -734,7 +802,9 @@ class DiagnosticsWindow(QMainWindow):
         self.record_button.setEnabled(True)
         self.record_label.setEnabled(True)
         self.calibration_button.setEnabled(True)
-        self.calibration_label.setText("calibration cancelled" if cancelled else "calibration complete")
+        message = "calibration cancelled" if cancelled else "calibration complete"
+        self.calibration_label.setText(message)
+        self._set_calibration_prompt(message, active=False)
         self._log(f"Jaw calibration saved: {path}")
         if not cancelled and path is not None:
             self._train_and_load_jaw_model(path)
@@ -745,15 +815,42 @@ class DiagnosticsWindow(QMainWindow):
             self.jaw_predictor = JawPredictor.load(profile, self.config.jaw)
             self.jaw_event_count = 0
             self.last_jaw_event_sample = -10_000_000
-            self._log(f"Jaw model trained: {profile}")
+            self._log(f"Jaw clench model trained but not validated: {profile}")
         except Exception as exc:
             self._log(f"Jaw model training failed: {exc}")
+
+    @Slot()
+    def run_jaw_model_qa(self) -> None:
+        sessions_root = Path("data/sessions")
+        sessions, skipped = discover_usable_sessions(sessions_root, self.config)
+        if skipped:
+            self._log(f"Jaw QA skipped {len(skipped)} unusable session(s)")
+        if len(sessions) < 2:
+            self._log("Jaw QA requires at least two complete guided sessions")
+            return
+        train_sessions = sessions[:-1]
+        validation_sessions = [sessions[-1]]
+        try:
+            report = train_and_evaluate_profile(train_sessions, validation_sessions, self.config)
+            self.jaw_predictor = JawPredictor.load(Path(report["profile_dir"]), self.config.jaw)
+            self.jaw_event_count = 0
+            self.last_jaw_event_sample = -10_000_000
+            metrics = report["metrics"]
+            self._log(
+                "Jaw QA "
+                f"{report['validation_status']}: report={report['report_dir']} "
+                f"threshold={report['selected_threshold']:.2f} "
+                f"precision={metrics['precision']:.2f} recall={metrics['recall']:.2f} "
+                f"fp/min={metrics['false_positives_per_minute']:.2f}"
+            )
+        except Exception as exc:
+            self._log(f"Jaw QA failed: {exc}")
 
     def _load_jaw_predictor(self) -> None:
         profile = Path("models") / self.config.jaw.profile_name
         try:
             self.jaw_predictor = JawPredictor.load(profile, self.config.jaw)
-            self.latest_jaw_prediction = JawPrediction(0.0, 0.0, "relaxed")
+            self.latest_jaw_prediction = JawPrediction(0.0, "relaxed")
         except Exception:
             self.jaw_predictor = None
 
@@ -922,16 +1019,17 @@ class DiagnosticsWindow(QMainWindow):
         current_sample = self.total_packets
         refractory = int(round(self.config.jaw.sampling_rate))
         if (
-            self.latest_jaw_prediction.event_confidence >= self.config.jaw.event_threshold
+            self.latest_jaw_prediction.event_confidence >= self.jaw_predictor.threshold
             and current_sample - self.last_jaw_event_sample >= refractory
         ):
             self.jaw_event_count += 1
             self.last_jaw_event_sample = current_sample
+        status = "validated" if self.jaw_predictor.validated else "unvalidated"
         self.jaw_preview_label.setText(
             f"{self.latest_jaw_prediction.state}  "
-            f"event {self.latest_jaw_prediction.event_confidence:.2f}  "
-            f"hold {self.latest_jaw_prediction.hold_confidence:.2f}  "
-            f"count {self.jaw_event_count}"
+            f"clench {self.latest_jaw_prediction.event_confidence:.2f}  "
+            f"thr {self.jaw_predictor.threshold:.2f}  "
+            f"count {self.jaw_event_count}  {status}"
         )
 
     def _refresh_table(self) -> None:
@@ -1052,6 +1150,24 @@ class DiagnosticsWindow(QMainWindow):
     def _log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"{timestamp} {message}")
+
+    def _set_calibration_prompt(self, message: str, active: bool) -> None:
+        if not hasattr(self, "calibration_prompt_label"):
+            return
+        self.calibration_prompt_label.setText(message)
+        border = "#f0b84f" if active else "#374149"
+        background = "#1b1710" if active else "#0d1012"
+        self.calibration_prompt_label.setStyleSheet(
+            "QLabel#calibrationPrompt {"
+            f"background: {background};"
+            f"border: 1px solid {border};"
+            "border-radius: 6px;"
+            "color: #f4f7f8;"
+            "font-size: 24px;"
+            "font-weight: 700;"
+            "padding: 16px;"
+            "}"
+        )
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._disarm_cursor("app closing")

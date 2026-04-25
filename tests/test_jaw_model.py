@@ -12,7 +12,6 @@ def test_jaw_model_training_writes_artifacts(tmp_path):
     config.jaw.sampling_rate = 20.0
     raw = np.zeros((NUM_ROWS, 200), dtype=float)
     raw[2, 40:50] = 50.0
-    raw[2, 120:170] = 80.0
     session = tmp_path / "session"
     session.mkdir()
     np.savez_compressed(session / "raw.npz", raw=raw)
@@ -20,7 +19,6 @@ def test_jaw_model_training_writes_artifacts(tmp_path):
         {"label": "neutral", "type": "interval", "start_sample": 0, "end_sample": 30},
         {"label": "neutral", "type": "interval", "start_sample": 70, "end_sample": 110},
         {"label": "jaw_clench", "type": "interval", "start_sample": 40, "end_sample": 50},
-        {"label": "jaw_hold", "type": "interval", "start_sample": 120, "end_sample": 170},
     ]
     with (session / "labels.jsonl").open("w", encoding="utf-8") as handle:
         for label in labels:
@@ -28,12 +26,12 @@ def test_jaw_model_training_writes_artifacts(tmp_path):
 
     profile = train_profile([session], config, profile_dir=tmp_path / "model")
     predictor = JawPredictor.load(profile, config.jaw)
-    prediction = predictor.predict(raw[:, 120:170])
+    prediction = predictor.predict(raw[:, 35:55])
 
     assert (profile / "jaw_event.joblib").exists()
-    assert (profile / "jaw_hold_state.joblib").exists()
     assert (profile / "metadata.json").exists()
-    assert prediction.hold_confidence >= 0.0
+    assert prediction.event_confidence >= 0.0
+    assert prediction.state in {"relaxed", "clench"}
 
 
 def test_jaw_model_uses_session_sampling_rate_metadata(tmp_path):

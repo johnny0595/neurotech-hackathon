@@ -24,7 +24,6 @@ from .jaw_features import (
 @dataclass(frozen=True)
 class JawPrediction:
     event_confidence: float
-    hold_confidence: float
     state: str
 
 
@@ -46,7 +45,7 @@ def train_profile(
     target_dir = profile_dir or Path("models") / config.jaw.profile_name
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    event_x, event_y, hold_x, hold_y = [], [], [], []
+    event_x, event_y = [], []
     references: list[dict[str, float]] = []
     session_rates: list[float] = []
     session_channels: list[list[int]] = []
@@ -58,24 +57,24 @@ def train_profile(
         reference = neutral_reference(raw, labels, jaw_config)
         references.append(reference)
         exg = jaw_signal(raw, jaw_config)
-        event_examples = _training_examples(exg, labels, jaw_config, "jaw_clench", reference)
-        hold_examples = _training_examples(exg, labels, jaw_config, "jaw_hold", reference)
+        event_examples = jaw_clench_training_examples(exg, labels, jaw_config, reference)
         event_x.extend([row[0] for row in event_examples])
         event_y.extend([row[1] for row in event_examples])
-        hold_x.extend([row[0] for row in hold_examples])
-        hold_y.extend([row[1] for row in hold_examples])
     if len({round(rate, 6) for rate in session_rates}) > 1:
         raise ValueError(f"cannot train one jaw model from mixed sample rates: {session_rates}")
     if len({tuple(channels) for channels in session_channels}) > 1:
         raise ValueError(f"cannot train one jaw model from mixed jaw channels: {session_channels}")
+    if not any(event_y):
+        raise ValueError("jaw model training requires at least one jaw_clench interval")
+    if not any(label == 0 for label in event_y):
+        raise ValueError("jaw model training requires at least one neutral interval")
 
     event_model = _fit_classifier(event_x, event_y)
-    hold_model = _fit_classifier(hold_x, hold_y)
     _dump_model(target_dir / "jaw_event.joblib", event_model)
-    _dump_model(target_dir / "jaw_hold_state.joblib", hold_model)
 
     neutral = _median_reference(references)
     metadata = {
+        "model_kind": "jaw_clench_binary",
         "profile_name": config.jaw.profile_name,
         "jaw_channels": session_channels[0],
         "sampling_rate_hz": session_rates[0],
@@ -83,7 +82,10 @@ def train_profile(
         "neutral_reference": neutral,
         "sessions": [str(path) for path in session_dirs],
         "event_examples": len(event_y),
-        "hold_examples": len(hold_y),
+        "positive_examples": int(sum(event_y)),
+        "negative_examples": int(len(event_y) - sum(event_y)),
+        "event_threshold": float(config.jaw.event_threshold),
+        "validation_status": "unvalidated",
     }
     with (target_dir / "metadata.json").open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, sort_keys=True)
@@ -94,14 +96,16 @@ class JawPredictor:
     def __init__(
         self,
         event_model: Any,
-        hold_model: Any,
         neutral: dict[str, float],
         config: JawConfig,
+        threshold: float | None = None,
+        validated: bool = False,
     ) -> None:
         self.event_model = event_model
-        self.hold_model = hold_model
         self.neutral = neutral
         self.config = config
+        self.threshold = float(threshold if threshold is not None else config.event_threshold)
+        self.validated = bool(validated)
 
     @classmethod
     def load(cls, profile_dir: Path, config: JawConfig) -> "JawPredictor":
@@ -115,27 +119,21 @@ class JawPredictor:
             model_config.sampling_rate = float(metadata["sampling_rate_hz"])
         return cls(
             event_model=_load_model(profile_dir / "jaw_event.joblib"),
-            hold_model=_load_model(profile_dir / "jaw_hold_state.joblib"),
             neutral=dict(metadata.get("neutral_reference") or {}),
             config=model_config,
+            threshold=float(metadata.get("event_threshold", model_config.event_threshold)),
+            validated=str(metadata.get("validation_status", "")).lower() == "passed",
         )
 
     def predict(self, raw: np.ndarray) -> JawPrediction:
         exg = jaw_signal(raw, self.config)
         event_samples = max(2, int(round(self.config.short_clench_seconds * self.config.sampling_rate)))
-        hold_samples = max(event_samples, int(round(min(self.config.hold_seconds, 1.0) * self.config.sampling_rate)))
         event_conf = _predict_probability(
             self.event_model,
             jaw_feature_vector(exg[-event_samples:], self.config.sampling_rate, self.neutral),
         )
-        hold_conf = _predict_probability(
-            self.hold_model,
-            jaw_feature_vector(exg[-hold_samples:], self.config.sampling_rate, self.neutral),
-        )
-        state = "holding" if hold_conf >= self.config.hold_threshold else "relaxed"
-        if event_conf >= self.config.event_threshold and state == "relaxed":
-            state = "clench_event"
-        return JawPrediction(event_confidence=event_conf, hold_confidence=hold_conf, state=state)
+        state = "clench" if event_conf >= self.threshold else "relaxed"
+        return JawPrediction(event_confidence=event_conf, state=state)
 
 
 def train_from_args(argv: list[str] | None = None) -> int:
@@ -155,24 +153,26 @@ def train_from_args(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _training_examples(
+def jaw_clench_training_examples(
     exg: np.ndarray,
     labels: list[dict[str, Any]],
     config: JawConfig,
-    positive_label: str,
     reference: dict[str, float],
 ) -> list[tuple[np.ndarray, int]]:
     rows: list[tuple[np.ndarray, int]] = []
     intervals = interval_labels(labels)
-    positive_intervals = [row for row in intervals if row.get("label") == positive_label]
+    positive_intervals = [row for row in intervals if row.get("label") == "jaw_clench"]
     neutral_intervals = [row for row in intervals if row.get("label") == "neutral"]
     for row in positive_intervals:
         start, end = int(row["start_sample"]), int(row["end_sample"])
         rows.append((jaw_feature_vector(exg[start:end], config.sampling_rate, reference), 1))
-    window_seconds = config.short_clench_seconds if positive_label == "jaw_clench" else min(1.0, config.hold_seconds)
-    window = max(2, int(round(window_seconds * config.sampling_rate)))
+    window = max(2, int(round(config.short_clench_seconds * config.sampling_rate)))
     for row in neutral_intervals:
         start, end = int(row["start_sample"]), int(row["end_sample"])
+        if end - start < window:
+            if end - start >= 2:
+                rows.append((jaw_feature_vector(exg[start:end], config.sampling_rate, reference), 0))
+            continue
         for neg_start in range(start, max(start, end - window + 1), window):
             neg_end = min(end, neg_start + window)
             if neg_end - neg_start >= max(2, window // 2):
@@ -224,6 +224,10 @@ class ConstantProbability:
 def _predict_probability(model: Any, vector: np.ndarray) -> float:
     proba = model.predict_proba(vector.reshape(1, -1))
     return float(proba[0, 1])
+
+
+def predict_probability(model: Any, vector: np.ndarray) -> float:
+    return _predict_probability(model, vector)
 
 
 def _dump_model(path: Path, model: Any) -> None:
