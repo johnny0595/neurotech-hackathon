@@ -48,17 +48,26 @@ def train_profile(
 
     event_x, event_y, hold_x, hold_y = [], [], [], []
     references: list[dict[str, float]] = []
+    session_rates: list[float] = []
+    session_channels: list[list[int]] = []
     for session_dir in session_dirs:
         raw, labels = load_session(session_dir)
-        reference = neutral_reference(raw, labels, config.jaw)
+        jaw_config = _session_jaw_config(session_dir, config.jaw)
+        session_rates.append(jaw_config.sampling_rate)
+        session_channels.append(list(jaw_config.channels))
+        reference = neutral_reference(raw, labels, jaw_config)
         references.append(reference)
-        exg = jaw_signal(raw, config.jaw)
-        event_examples = _training_examples(exg, labels, config.jaw, "jaw_clench", reference)
-        hold_examples = _training_examples(exg, labels, config.jaw, "jaw_hold", reference)
+        exg = jaw_signal(raw, jaw_config)
+        event_examples = _training_examples(exg, labels, jaw_config, "jaw_clench", reference)
+        hold_examples = _training_examples(exg, labels, jaw_config, "jaw_hold", reference)
         event_x.extend([row[0] for row in event_examples])
         event_y.extend([row[1] for row in event_examples])
         hold_x.extend([row[0] for row in hold_examples])
         hold_y.extend([row[1] for row in hold_examples])
+    if len({round(rate, 6) for rate in session_rates}) > 1:
+        raise ValueError(f"cannot train one jaw model from mixed sample rates: {session_rates}")
+    if len({tuple(channels) for channels in session_channels}) > 1:
+        raise ValueError(f"cannot train one jaw model from mixed jaw channels: {session_channels}")
 
     event_model = _fit_classifier(event_x, event_y)
     hold_model = _fit_classifier(hold_x, hold_y)
@@ -68,8 +77,8 @@ def train_profile(
     neutral = _median_reference(references)
     metadata = {
         "profile_name": config.jaw.profile_name,
-        "jaw_channels": list(config.jaw.channels),
-        "sampling_rate_hz": config.jaw.sampling_rate,
+        "jaw_channels": session_channels[0],
+        "sampling_rate_hz": session_rates[0],
         "feature_names": list(FEATURE_NAMES),
         "neutral_reference": neutral,
         "sessions": [str(path) for path in session_dirs],
@@ -99,11 +108,16 @@ class JawPredictor:
         metadata_path = profile_dir / "metadata.json"
         with metadata_path.open("r", encoding="utf-8") as handle:
             metadata = json.load(handle)
+        model_config = JawConfig(**config.__dict__)
+        if metadata.get("jaw_channels"):
+            model_config.channels = [int(channel) for channel in metadata["jaw_channels"]]
+        if metadata.get("sampling_rate_hz"):
+            model_config.sampling_rate = float(metadata["sampling_rate_hz"])
         return cls(
             event_model=_load_model(profile_dir / "jaw_event.joblib"),
             hold_model=_load_model(profile_dir / "jaw_hold_state.joblib"),
             neutral=dict(metadata.get("neutral_reference") or {}),
-            config=config,
+            config=model_config,
         )
 
     def predict(self, raw: np.ndarray) -> JawPrediction:
@@ -164,6 +178,24 @@ def _training_examples(
             if neg_end - neg_start >= max(2, window // 2):
                 rows.append((jaw_feature_vector(exg[neg_start:neg_end], config.sampling_rate, reference), 0))
     return rows
+
+
+def _session_jaw_config(session_dir: Path, fallback: JawConfig) -> JawConfig:
+    raw: dict[str, Any] = {}
+    for filename in ("summary.json", "metadata.json"):
+        path = session_dir / filename
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        raw = dict((payload.get("config") or {}).get("jaw") or {})
+        if raw:
+            break
+    if not raw:
+        return JawConfig(**fallback.__dict__)
+    merged = dict(fallback.__dict__)
+    merged.update(raw)
+    return JawConfig(**merged)
 
 
 def _fit_classifier(features: list[np.ndarray], labels: list[int]) -> Any:

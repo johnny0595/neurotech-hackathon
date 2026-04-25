@@ -279,26 +279,57 @@ def _resolve_csv_sampling_rate(
 
 
 def _manual_labels_from_args(args: argparse.Namespace, config: JawConfig, samples: int) -> list[dict[str, Any]]:
-    labels: list[dict[str, Any]] = [
-        {
-            "label": "neutral",
-            "type": "interval",
-            "start_sample": 0,
-            "end_sample": samples,
-            "trial_type": "background",
-            "trial_index": 0,
-        }
-    ]
+    labels: list[dict[str, Any]] = []
+    positive_intervals: list[tuple[int, int]] = []
     for index, center in enumerate(_parse_times(args.event_times), start=1):
-        half = config.short_clench_seconds * 0.5
-        start = max(0, int(round((center - half) * config.sampling_rate)))
-        end = min(samples, int(round((center + half) * config.sampling_rate)))
+        duration = max(1, int(round(config.short_clench_seconds * config.sampling_rate)))
+        center_sample = int(round(center * config.sampling_rate))
+        start = max(0, center_sample - duration // 2)
+        end = min(samples, start + duration)
+        if end > start:
+            positive_intervals.append((start, end))
         labels.extend(_event_interval_labels("jaw_clench", "jaw_clench_start", "jaw_clench_end", start, end, index, config))
     for index, (start_s, end_s) in enumerate(_parse_intervals(args.hold_intervals), start=1):
         start = max(0, int(round(start_s * config.sampling_rate)))
         end = min(samples, int(round(end_s * config.sampling_rate)))
+        if end > start:
+            positive_intervals.append((start, end))
         labels.extend(_event_interval_labels("jaw_hold", "jaw_hold_start", "jaw_hold_end", start, end, index, config))
+    return _neutral_complement_labels(positive_intervals, samples) + labels
+
+
+def _neutral_complement_labels(positive_intervals: list[tuple[int, int]], samples: int) -> list[dict[str, Any]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(positive_intervals):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    labels: list[dict[str, Any]] = []
+    cursor = 0
+    index = 0
+    for start, end in merged:
+        if start > cursor:
+            index += 1
+            labels.append(_neutral_label(cursor, start, index))
+        cursor = max(cursor, end)
+    if cursor < samples:
+        index += 1
+        labels.append(_neutral_label(cursor, samples, index))
+    if not labels:
+        labels.append(_neutral_label(0, samples, 1))
     return labels
+
+
+def _neutral_label(start: int, end: int, index: int) -> dict[str, Any]:
+    return {
+        "label": "neutral",
+        "type": "interval",
+        "start_sample": start,
+        "end_sample": end,
+        "trial_type": "background",
+        "trial_index": index,
+    }
 
 
 def _event_interval_labels(

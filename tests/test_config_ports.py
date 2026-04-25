@@ -31,6 +31,13 @@ def test_invalid_mouse_smoothing_rejected():
         validate_config(config)
 
 
+def test_invalid_jaw_channel_rejected():
+    config = AppConfig()
+    config.jaw.channels = [9]
+    with pytest.raises(ValueError):
+        validate_config(config)
+
+
 def test_existing_preferred_port_wins(tmp_path, monkeypatch):
     fake = tmp_path / "cu.usbserial-TEST"
     fake.touch()
