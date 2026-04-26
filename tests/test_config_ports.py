@@ -46,6 +46,13 @@ def test_invalid_mouse_full_tilt_rejected():
         validate_config(config)
 
 
+def test_invalid_eyebrow_click_refractory_rejected():
+    config = AppConfig()
+    config.jaw.click_refractory_seconds = 0.0
+    with pytest.raises(ValueError):
+        validate_config(config)
+
+
 def test_degenerate_cursor_axis_calibration_rejected():
     config = AppConfig()
     config.mouse.x_axis_roll = 1.0

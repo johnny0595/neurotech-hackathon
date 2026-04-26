@@ -155,6 +155,8 @@ class DiagnosticsWindow(QMainWindow):
         self.latest_jaw_prediction = JawPrediction(0.0, "no_model")
         self.jaw_event_count = 0
         self.last_jaw_event_sample = -10_000_000
+        self.last_eyebrow_click_sample = -10_000_000
+        self.eyebrow_click_count = 0
         self.last_calibration_session: Path | None = None
         self.channel_active_checks: dict[int, QCheckBox] = {}
         self.channel_rld_checks: dict[int, QCheckBox] = {}
@@ -1187,9 +1189,10 @@ class DiagnosticsWindow(QMainWindow):
         self.cursor_armed = True
         self.last_cursor_step = time.monotonic()
         self.latest_cursor_velocity = MouseVelocity(0.0, 0.0)
+        self.last_eyebrow_click_sample = -10_000_000
         self.arm_cursor_button.setText("Disarm Cursor")
         self.cursor_label.setText("armed  vx 0  vy 0")
-        self._log("Cursor armed. Zero (level) is the neutral pose; press Esc in this window to stop.")
+        self._log("Cursor armed. Eyebrow raises will left click; press Esc in this window to stop.")
 
     def _disarm_cursor(self, reason: str) -> None:
         if not self.cursor_armed:
@@ -1281,14 +1284,29 @@ class DiagnosticsWindow(QMainWindow):
         ):
             self.jaw_event_count += 1
             self.last_jaw_event_sample = current_sample
+            if self.cursor_armed and self._eyebrow_click_allowed(current_sample):
+                if self.cursor_controller.click_left():
+                    self.eyebrow_click_count += 1
+                    self.last_eyebrow_click_sample = current_sample
+                    self._log(f"Eyebrow click sent count={self.eyebrow_click_count}")
+                else:
+                    self._log("Eyebrow click failed; check macOS Accessibility permission")
         status = "validated" if self.jaw_predictor.validated else "unvalidated"
         target = self.jaw_predictor.positive_label.replace("_", " ")
         self.jaw_preview_label.setText(
             f"{self.latest_jaw_prediction.state}  "
             f"{target} {self.latest_jaw_prediction.event_confidence:.2f}  "
             f"thr {self.jaw_predictor.threshold:.2f}  "
-            f"count {self.jaw_event_count}  {status}"
+            f"events {self.jaw_event_count}  clicks {self.eyebrow_click_count}  {status}"
         )
+
+    def _eyebrow_click_allowed(self, current_sample: int) -> bool:
+        if self.jaw_predictor is None:
+            return False
+        if self.jaw_predictor.positive_label != "eyebrow_raise":
+            return False
+        refractory = int(round(self.config.jaw.click_refractory_seconds * self.config.jaw.sampling_rate))
+        return current_sample - self.last_eyebrow_click_sample >= refractory
 
     def _refresh_table(self) -> None:
         for stat in row_stats(self.buffer[:, -250:]):

@@ -75,3 +75,4 @@ jaw:
   profile_name: eyebrow
   event_threshold: 0.70
   hold_threshold: 0.70
+  click_refractory_seconds: 1.0

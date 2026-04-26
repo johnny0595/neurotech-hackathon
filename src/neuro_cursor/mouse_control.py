@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import ctypes
 from dataclasses import dataclass
 from math import hypot
 
@@ -223,6 +225,183 @@ class QtCursorController:
         if y in (bounds.top(), bounds.bottom()):
             self._rem_y = 0.0
         QCursor.setPos(QPoint(x, y))
+
+    def click_left(self) -> bool:
+        position = QCursor.pos()
+        return post_left_click(position.x(), position.y())
+
+
+def post_left_click(x: int, y: int) -> bool:
+    """Post one global left click at screen coordinates."""
+
+    if _post_left_click_quartz(x, y):
+        return True
+    if _post_left_click_coregraphics(x, y):
+        return True
+    return _post_left_click_osascript(x, y)
+
+
+def _post_left_click_quartz(x: int, y: int) -> bool:
+    try:
+        import Quartz  # type: ignore[import-not-found]
+    except Exception:
+        return False
+    try:
+        point = (int(x), int(y))
+        down = Quartz.CGEventCreateMouseEvent(
+            None,
+            Quartz.kCGEventLeftMouseDown,
+            point,
+            Quartz.kCGMouseButtonLeft,
+        )
+        up = Quartz.CGEventCreateMouseEvent(
+            None,
+            Quartz.kCGEventLeftMouseUp,
+            point,
+            Quartz.kCGMouseButtonLeft,
+        )
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+    except Exception:
+        return False
+    return True
+
+
+class _CGPoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+
+def _post_left_click_coregraphics(x: int, y: int) -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        app_services = ctypes.CDLL(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+        core_foundation = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+    except OSError:
+        return False
+
+    app_services.CGEventCreateMouseEvent.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        _CGPoint,
+        ctypes.c_uint32,
+    ]
+    app_services.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+    app_services.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    app_services.CGEventPost.restype = None
+    core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+    core_foundation.CFRelease.restype = None
+
+    k_cg_hid_event_tap = 0
+    k_cg_event_left_mouse_down = 1
+    k_cg_event_left_mouse_up = 2
+    k_cg_mouse_button_left = 0
+    point = _CGPoint(float(x), float(y))
+    down = app_services.CGEventCreateMouseEvent(
+        None,
+        k_cg_event_left_mouse_down,
+        point,
+        k_cg_mouse_button_left,
+    )
+    up = app_services.CGEventCreateMouseEvent(
+        None,
+        k_cg_event_left_mouse_up,
+        point,
+        k_cg_mouse_button_left,
+    )
+    if not down or not up:
+        if down:
+            core_foundation.CFRelease(down)
+        if up:
+            core_foundation.CFRelease(up)
+        request_accessibility_prompt()
+        return False
+    try:
+        app_services.CGEventPost(k_cg_hid_event_tap, down)
+        app_services.CGEventPost(k_cg_hid_event_tap, up)
+    finally:
+        core_foundation.CFRelease(down)
+        core_foundation.CFRelease(up)
+    return True
+
+
+def _post_left_click_osascript(x: int, y: int) -> bool:
+    if sys.platform != "darwin":
+        return False
+    request_accessibility_prompt()
+    return False
+
+
+def request_accessibility_prompt() -> bool:
+    """Ask macOS to show the Accessibility permission prompt for this process."""
+
+    if sys.platform != "darwin":
+        return False
+    try:
+        app_services = ctypes.CDLL(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+        core_foundation = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+    except Exception:
+        return False
+
+    core_foundation.CFStringCreateWithCString.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_uint32,
+    ]
+    core_foundation.CFStringCreateWithCString.restype = ctypes.c_void_p
+    core_foundation.CFDictionaryCreate.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_long,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    core_foundation.CFDictionaryCreate.restype = ctypes.c_void_p
+    core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+    core_foundation.CFRelease.restype = None
+    app_services.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+    app_services.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+
+    utf8 = 0x08000100
+    prompt_key = core_foundation.CFStringCreateWithCString(
+        None,
+        b"AXTrustedCheckOptionPrompt",
+        utf8,
+    )
+    if not prompt_key:
+        return False
+    try:
+        true_value = ctypes.c_void_p.in_dll(core_foundation, "kCFBooleanTrue")
+        keys = (ctypes.c_void_p * 1)(prompt_key)
+        values = (ctypes.c_void_p * 1)(true_value.value)
+        options = core_foundation.CFDictionaryCreate(
+            None,
+            keys,
+            values,
+            1,
+            None,
+            None,
+        )
+        if not options:
+            return False
+        try:
+            app_services.AXIsProcessTrustedWithOptions(options)
+        finally:
+            core_foundation.CFRelease(options)
+    except Exception:
+        return False
+    finally:
+        core_foundation.CFRelease(prompt_key)
+    return True
 
 
 def _virtual_screen_geometry() -> QRect:

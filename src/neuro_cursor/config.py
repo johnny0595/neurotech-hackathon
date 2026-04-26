@@ -88,6 +88,7 @@ class JawConfig:
     profile_name: str = "eyebrow"
     event_threshold: float = 0.70
     hold_threshold: float = 0.70
+    click_refractory_seconds: float = 1.0
 
 
 @dataclass
@@ -242,6 +243,8 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("jaw.event_threshold must be between 0 and 1")
     if not 0.0 < config.jaw.hold_threshold < 1.0:
         raise ValueError("jaw.hold_threshold must be between 0 and 1")
+    if config.jaw.click_refractory_seconds <= 0:
+        raise ValueError("jaw.click_refractory_seconds must be positive")
     if not config.board.active_exg_channels:
         raise ValueError("at least one active EXG channel is required")
     invalid = [channel for channel in config.board.active_exg_channels if channel < 1 or channel > 8]

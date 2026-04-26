@@ -33,8 +33,9 @@ bar if the direction or sensitivity feels wrong. When the head is still near
 neutral for several seconds, the app auto-zeros orientation drift.
 
 Press `Esc` while the diagnostics window is focused, click `Disarm Cursor`, stop
-the stream, or close the app to stop cursor motion. This implementation moves
-the pointer only; it does not click or drag.
+the stream, or close the app to stop cursor motion and eyebrow-click behavior.
+When armed, a detected `eyebrow_raise` sends one left click with a refractory
+delay so a single raise does not repeat rapidly. It does not drag.
 
 On macOS, grant the terminal or app used to launch `uv run neuro-cursor`
 Accessibility permission in System Settings > Privacy & Security > Accessibility
@@ -72,8 +73,9 @@ Each guided session includes:
 - `features.json`: channel-2 RMS, peak-to-peak, slope, bandpower, envelope stats
 - `metadata.json`: config, row map, active EXG channels, and connection info
 
-The live preview shows one confidence value, detected event count, and state:
-`relaxed` or the active positive label. It does not click or drag the mouse.
+The live preview shows one confidence value, detected event count, click count,
+and state: `relaxed` or the active positive label. Clicks are sent only after
+you explicitly arm cursor control.
 
 For terminal captures:
 

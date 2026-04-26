@@ -3,6 +3,7 @@ import pytest
 from neuro_cursor.config import MouseConfig
 from neuro_cursor.mouse_control import (
     calibrated_axes_from_samples,
+    post_left_click,
     tilt_to_velocity,
     with_cursor_axis_calibration,
 )
@@ -105,3 +106,30 @@ def test_cursor_axis_calibration_rejects_degenerate_tilts():
             up_tilt=(11.0, 0.0),
             down_tilt=(12.0, 0.0),
         )
+
+
+def test_left_click_falls_back_to_osascript_on_macos(monkeypatch):
+    prompted = []
+
+    monkeypatch.setattr("neuro_cursor.mouse_control._post_left_click_quartz", lambda x, y: False)
+    monkeypatch.setattr("neuro_cursor.mouse_control._post_left_click_coregraphics", lambda x, y: False)
+    monkeypatch.setattr("neuro_cursor.mouse_control.sys.platform", "darwin")
+    monkeypatch.setattr("neuro_cursor.mouse_control.request_accessibility_prompt", lambda: prompted.append(True) or True)
+
+    assert post_left_click(12, 34) is False
+    assert prompted == [True]
+
+
+def test_left_click_returns_false_when_no_backend(monkeypatch):
+    monkeypatch.setattr("neuro_cursor.mouse_control._post_left_click_quartz", lambda x, y: False)
+    monkeypatch.setattr("neuro_cursor.mouse_control._post_left_click_coregraphics", lambda x, y: False)
+    monkeypatch.setattr("neuro_cursor.mouse_control.sys.platform", "linux")
+
+    assert post_left_click(12, 34) is False
+
+
+def test_left_click_uses_coregraphics_before_prompt(monkeypatch):
+    monkeypatch.setattr("neuro_cursor.mouse_control._post_left_click_quartz", lambda x, y: False)
+    monkeypatch.setattr("neuro_cursor.mouse_control._post_left_click_coregraphics", lambda x, y: True)
+
+    assert post_left_click(12, 34) is True
