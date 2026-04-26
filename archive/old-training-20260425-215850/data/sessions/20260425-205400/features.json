@@ -1,0 +1,167 @@
+{
+  "counter_gaps": 92,
+  "exg_features": [
+    {
+      "channel": 1,
+      "label": "exg_1",
+      "latest": 0.0,
+      "mean": 0.0,
+      "mean_abs_slope": 0.0,
+      "median": 0.0,
+      "nonzero_samples": 0,
+      "peak_to_peak": 0.0,
+      "rms_centered": 0.0,
+      "row": 1
+    },
+    {
+      "channel": 2,
+      "label": "exg_2",
+      "latest": 13855.4033203125,
+      "mean": 16232.061495049054,
+      "mean_abs_slope": 5484.191905975342,
+      "median": 16398.611328125,
+      "nonzero_samples": 129,
+      "peak_to_peak": 29663.989990234375,
+      "rms_centered": 6159.655509492956,
+      "row": 2
+    },
+    {
+      "channel": 3,
+      "label": "exg_3",
+      "latest": 0.0,
+      "mean": 0.0,
+      "mean_abs_slope": 0.0,
+      "median": 0.0,
+      "nonzero_samples": 0,
+      "peak_to_peak": 0.0,
+      "rms_centered": 0.0,
+      "row": 3
+    },
+    {
+      "channel": 4,
+      "label": "exg_4",
+      "latest": 0.0,
+      "mean": 0.0,
+      "mean_abs_slope": 0.0,
+      "median": 0.0,
+      "nonzero_samples": 0,
+      "peak_to_peak": 0.0,
+      "rms_centered": 0.0,
+      "row": 4
+    },
+    {
+      "channel": 5,
+      "label": "exg_5",
+      "latest": 0.0,
+      "mean": 0.0,
+      "mean_abs_slope": 0.0,
+      "median": 0.0,
+      "nonzero_samples": 0,
+      "peak_to_peak": 0.0,
+      "rms_centered": 0.0,
+      "row": 5
+    },
+    {
+      "channel": 6,
+      "label": "exg_6",
+      "latest": 0.0,
+      "mean": 0.0,
+      "mean_abs_slope": 0.0,
+      "median": 0.0,
+      "nonzero_samples": 0,
+      "peak_to_peak": 0.0,
+      "rms_centered": 0.0,
+      "row": 6
+    },
+    {
+      "channel": 7,
+      "label": "exg_7",
+      "latest": 0.0,
+      "mean": 0.0,
+      "mean_abs_slope": 0.0,
+      "median": 0.0,
+      "nonzero_samples": 0,
+      "peak_to_peak": 0.0,
+      "rms_centered": 0.0,
+      "row": 7
+    },
+    {
+      "channel": 8,
+      "label": "exg_8",
+      "latest": 0.0,
+      "mean": 0.0,
+      "mean_abs_slope": 0.0,
+      "median": 0.0,
+      "nonzero_samples": 0,
+      "peak_to_peak": 0.0,
+      "rms_centered": 0.0,
+      "row": 8
+    }
+  ],
+  "jaw": {
+    "clips": [
+      {
+        "end_sample": 129,
+        "event_end_sample": 129,
+        "event_start_sample": 0,
+        "features": {
+          "bandpower_20_45": 7490278.482475266,
+          "bandpower_45_60": 3929452.81120022,
+          "emg_envelope_p95": 7251.85800453269,
+          "emg_mean_abs_slope": 5347.157802820516,
+          "emg_p2p_delta_neutral": 25607.78434122056,
+          "emg_peak_to_peak": 25607.78434122056,
+          "emg_rms": 5017.083404548713,
+          "emg_rms_delta_neutral": 5017.083404548713,
+          "high_low_power_ratio": 0.524607038362301,
+          "raw_mean_abs_slope": 5484.191905975342,
+          "raw_p2p_delta_neutral": 29663.989990234375,
+          "raw_peak_to_peak": 29663.989990234375,
+          "raw_rms_centered": 6159.655509492956,
+          "raw_rms_delta_neutral": 6159.655509492956
+        },
+        "label": "jaw_clench",
+        "start_sample": 0
+      }
+    ],
+    "jaw_channels": [
+      2
+    ],
+    "neutral_reference": {
+      "bandpower_20_45": 0.0,
+      "bandpower_45_60": 0.0,
+      "emg_envelope_p95": 0.0,
+      "emg_mean_abs_slope": 0.0,
+      "emg_p2p_delta_neutral": 0.0,
+      "emg_peak_to_peak": 0.0,
+      "emg_rms": 0.0,
+      "emg_rms_delta_neutral": 0.0,
+      "high_low_power_ratio": 0.0,
+      "raw_mean_abs_slope": 0.0,
+      "raw_p2p_delta_neutral": 0.0,
+      "raw_peak_to_peak": 0.0,
+      "raw_rms_centered": 0.0,
+      "raw_rms_delta_neutral": 0.0
+    },
+    "sampling_rate_hz": 125.0,
+    "whole_signal": {
+      "bandpower_20_45": 7490278.482475266,
+      "bandpower_45_60": 3929452.81120022,
+      "emg_envelope_p95": 7251.85800453269,
+      "emg_mean_abs_slope": 5347.157802820516,
+      "emg_p2p_delta_neutral": 25607.78434122056,
+      "emg_peak_to_peak": 25607.78434122056,
+      "emg_rms": 5017.083404548713,
+      "emg_rms_delta_neutral": 5017.083404548713,
+      "high_low_power_ratio": 0.524607038362301,
+      "raw_mean_abs_slope": 5484.191905975342,
+      "raw_p2p_delta_neutral": 29663.989990234375,
+      "raw_peak_to_peak": 29663.989990234375,
+      "raw_rms_centered": 6159.655509492956,
+      "raw_rms_delta_neutral": 6159.655509492956
+    }
+  },
+  "label": "jaw_clench",
+  "samples": 129,
+  "timestamp_rate_hz": 26.766886575192977
+}

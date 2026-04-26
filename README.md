@@ -17,17 +17,20 @@ port is not present, the app searches likely USB serial ports and fails clearly
 when no board is connected. Windows users should set `board.serial_port` to
 their COM port, for example `COM3`.
 
-The current EXG default is the one-sensor jaw setup: channel `2` is active and
-routed to RLD at gain `12`.
+The current EXG default is the one-sensor eyebrow setup: channel `2` is active,
+routed to RLD at gain `12`, and used for `eyebrow_raise` detection.
 
 ## Cursor Control
 
 Cursor movement is intentionally GUI-only and defaults to disarmed. Start the
-stream, click `Zero (level)` with your head in a neutral pose, then click
-`Arm Cursor`. Corrected roll controls horizontal cursor velocity and corrected
-pitch controls vertical cursor velocity. Use `Cursor DZ`, `Cursor speed`,
-`Invert X`, and `Invert Y` in the top bar if the direction or sensitivity feels
-wrong.
+stream, hold your head in a neutral pose, then click `Calibrate Cursor Axes`.
+Hold neutral, tilt left, tilt right, tilt up, then tilt down when prompted; the
+app learns how the current headset mounting maps corrected roll/pitch onto
+screen X/Y. Click `Arm Cursor` after calibration. The cursor uses a small
+radial deadzone, curved speed response, and a motion boost for quicker head
+moves. Use `Cursor DZ`, `Cursor speed`, `Invert X`, and `Invert Y` in the top
+bar if the direction or sensitivity feels wrong. When the head is still near
+neutral for several seconds, the app auto-zeros orientation drift.
 
 Press `Esc` while the diagnostics window is focused, click `Disarm Cursor`, stop
 the stream, or close the app to stop cursor motion. This implementation moves
@@ -51,50 +54,54 @@ Channel-control changes apply on the next stream start. If you change channels
 while streaming, stop and start the stream so the app can resend `chon_*`,
 `rldadd_*` or `rldremove_*`, and `choff_*` commands.
 
-## Jaw Data Recording
+## Short-Event Data Recording
 
-Use `Start Jaw Calibration` in the GUI for a guided session: neutral baseline,
-five short jaw clenches, and three clench-holds. The GUI writes event-level
-labels and trains a personal jaw model for live preview. `Start Jaw Recording`
-is still available for manually labeled whole-session captures.
+Use `Start Eyebrow Calibration` in the GUI for a guided short-event session.
+New guided sessions use only eyebrow prompts: 8 seconds of neutral baseline, 20
+randomized eyebrow raises, 20 hard-negative prompts, and 6 seconds of neutral
+baseline at the end. Hold prompts and jaw clench collection are disabled for the
+current workflow.
 
 Each guided session includes:
 
 - `raw.npz`: full 22-row BrainFlow data
 - `exg.csv`: 8 EXG columns, compatible with NeuroPawn visualizer-style CSVs
-- `labels.jsonl`: `jaw_clench_start/end` and `jaw_hold_start/end` event labels
-- `clips.npz`: clipped windows around each clench and hold
-- `features.json`: channel-2 jaw RMS, peak-to-peak, slope, bandpower, envelope stats
+- `labels.jsonl`: event-level labels such as `eyebrow_raise_start/end` and
+  `hard_negative_*`
+- `clips.npz`: clipped windows around each short event and hard negative
+- `features.json`: channel-2 RMS, peak-to-peak, slope, bandpower, envelope stats
 - `metadata.json`: config, row map, active EXG channels, and connection info
 
-The live preview shows jaw event confidence, hold confidence, detected event
-count, and state. It does not click or drag the mouse.
+The live preview shows one confidence value, detected event count, and state:
+`relaxed` or the active positive label. It does not click or drag the mouse.
 
 For terminal captures:
 
 ```bash
-uv run neuro-capture --config config/neuro_cursor.yaml --seconds 10 --label jaw_clench
+uv run neuro-capture --config config/neuro_cursor.yaml --seconds 10 --label eyebrow_raise
 ```
 
 To import an 8-column EXG CSV:
 
 ```bash
-uv run neuro-capture --config config/neuro_cursor.yaml --from-csv /path/to/recording.csv --duration-seconds 30 --label jaw_clench
+uv run neuro-capture --config config/neuro_cursor.yaml --from-csv /path/to/eyebrow.csv --duration-seconds 30 --label eyebrow_raise
 ```
 
-For externally recorded files, add event labels with clench center times or hold
-intervals:
+For externally recorded files, add eyebrow event labels with center times.
+`--hold-intervals` is kept only for importing older hold-labeled files.
 
 ```bash
-uv run neuro-capture --config config/neuro_cursor.yaml --from-csv /path/to/recording.csv --duration-seconds 30 --label jaw_clench --event-times 6.5,10.2,14.0
-uv run neuro-capture --config config/neuro_cursor.yaml --from-csv /path/to/recording.csv --duration-seconds 30 --label jaw_hold --hold-intervals 5.0:8.0,12.0:15.0
+uv run neuro-capture --config config/neuro_cursor.yaml --from-csv /path/to/eyebrow.csv --duration-seconds 30 --label eyebrow_raise --event-times 6.5,10.2,14.0
 ```
 
-To train from one or more guided sessions:
+To validate with held-out sessions and run the model bakeoff:
 
 ```bash
-uv run neuro-train-jaw data/sessions/<timestamp>
+uv run neuro-evaluate-jaw --config config/neuro_cursor.yaml --positive-label eyebrow_raise --profile eyebrow --profile-dir models/eyebrow --train-sessions data/sessions/<train1> data/sessions/<train2> --validation-sessions data/sessions/<validation>
 ```
+
+For the full eyebrow-only collection sequence, follow
+[docs/data_collection_protocol.md](docs/data_collection_protocol.md).
 
 ## BrainFlow Knight IMU Rows
 

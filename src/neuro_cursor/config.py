@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -43,12 +44,21 @@ class ImuConfig:
 
 @dataclass
 class MouseConfig:
-    dead_zone_degrees: float = 3.0
+    dead_zone_degrees: float = 1.25
     speed_px_per_second_per_degree: float = 70.0
     max_speed_px_per_second: float = 1400.0
     smoothing: float = 0.35
+    response_curve: float = 1.35
+    full_tilt_degrees: float = 18.0
+    motion_boost_px_per_second_per_degree: float = 8.0
     invert_x: bool = False
     invert_y: bool = False
+    center_roll_degrees: float = 0.0
+    center_pitch_degrees: float = 0.0
+    x_axis_roll: float = 1.0
+    x_axis_pitch: float = 0.0
+    y_axis_roll: float = 0.0
+    y_axis_pitch: float = 1.0
 
 
 @dataclass
@@ -60,9 +70,22 @@ class JawConfig:
     hold_seconds: float = 3.0
     pre_event_seconds: float = 0.5
     post_event_seconds: float = 0.8
-    short_clench_reps: int = 5
-    hold_reps: int = 3
-    profile_name: str = "default"
+    short_clench_reps: int = 20
+    hold_reps: int = 0
+    initial_neutral_seconds: float = 8.0
+    final_neutral_seconds: float = 6.0
+    event_min_seconds: float = 0.35
+    event_max_seconds: float = 0.50
+    relax_min_seconds: float = 1.2
+    relax_max_seconds: float = 2.5
+    hard_negative_reps: int = 5
+    hard_negative_seconds: float = 0.75
+    window_seconds: list[float] = field(default_factory=lambda: [0.25, 0.35, 0.50])
+    window_step_seconds: float = 0.05
+    positive_label: str = "eyebrow_raise"
+    protocol_version: str = "short_event_v2"
+    prompt_seed: int = 7
+    profile_name: str = "eyebrow"
     event_threshold: float = 0.70
     hold_threshold: float = 0.70
 
@@ -72,8 +95,8 @@ class AppConfig:
     board: BoardConfig = field(default_factory=BoardConfig)
     channel_map: dict[int, str] = field(
         default_factory=lambda: {
-            1: "jaw_left",
-            2: "jaw",
+            1: "unused",
+            2: "eyebrow",
             3: "unused",
             4: "unused",
         }
@@ -150,6 +173,28 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("mouse.max_speed_px_per_second must be positive")
     if not 0.0 <= config.mouse.smoothing <= 0.95:
         raise ValueError("mouse.smoothing must be between 0.0 and 0.95")
+    if config.mouse.response_curve < 1.0:
+        raise ValueError("mouse.response_curve must be at least 1.0")
+    if config.mouse.full_tilt_degrees <= config.mouse.dead_zone_degrees:
+        raise ValueError("mouse.full_tilt_degrees must be larger than dead_zone_degrees")
+    if config.mouse.motion_boost_px_per_second_per_degree < 0:
+        raise ValueError("mouse.motion_boost_px_per_second_per_degree must be non-negative")
+    mouse_axis_values = (
+        config.mouse.center_roll_degrees,
+        config.mouse.center_pitch_degrees,
+        config.mouse.x_axis_roll,
+        config.mouse.x_axis_pitch,
+        config.mouse.y_axis_roll,
+        config.mouse.y_axis_pitch,
+    )
+    if any(not isfinite(value) for value in mouse_axis_values):
+        raise ValueError("mouse cursor-axis calibration values must be finite")
+    determinant = (
+        config.mouse.x_axis_roll * config.mouse.y_axis_pitch
+        - config.mouse.x_axis_pitch * config.mouse.y_axis_roll
+    )
+    if abs(determinant) <= 1e-6:
+        raise ValueError("mouse cursor-axis calibration must not be degenerate")
     if not config.jaw.channels:
         raise ValueError("jaw.channels must contain at least one EXG channel")
     invalid_jaw = [channel for channel in config.jaw.channels if channel < 1 or channel > 8]
@@ -165,8 +210,34 @@ def validate_config(config: AppConfig) -> None:
     ):
         if getattr(config.jaw, name) <= 0:
             raise ValueError(f"jaw.{name} must be positive")
-    if config.jaw.short_clench_reps <= 0 or config.jaw.hold_reps <= 0:
-        raise ValueError("jaw repetition counts must be positive")
+    if config.jaw.short_clench_reps <= 0:
+        raise ValueError("jaw.short_clench_reps must be positive")
+    if config.jaw.hold_reps < 0:
+        raise ValueError("jaw.hold_reps must be non-negative")
+    if config.jaw.hard_negative_reps < 0:
+        raise ValueError("jaw.hard_negative_reps must be non-negative")
+    for name in (
+        "initial_neutral_seconds",
+        "final_neutral_seconds",
+        "event_min_seconds",
+        "event_max_seconds",
+        "relax_min_seconds",
+        "relax_max_seconds",
+        "hard_negative_seconds",
+        "window_step_seconds",
+    ):
+        if getattr(config.jaw, name) <= 0:
+            raise ValueError(f"jaw.{name} must be positive")
+    if config.jaw.event_max_seconds < config.jaw.event_min_seconds:
+        raise ValueError("jaw.event_max_seconds must be >= jaw.event_min_seconds")
+    if config.jaw.relax_max_seconds < config.jaw.relax_min_seconds:
+        raise ValueError("jaw.relax_max_seconds must be >= jaw.relax_min_seconds")
+    if not config.jaw.window_seconds:
+        raise ValueError("jaw.window_seconds must contain at least one value")
+    if any(value <= 0 for value in config.jaw.window_seconds):
+        raise ValueError("jaw.window_seconds values must be positive")
+    if not config.jaw.positive_label:
+        raise ValueError("jaw.positive_label must be non-empty")
     if not 0.0 < config.jaw.event_threshold < 1.0:
         raise ValueError("jaw.event_threshold must be between 0 and 1")
     if not 0.0 < config.jaw.hold_threshold < 1.0:

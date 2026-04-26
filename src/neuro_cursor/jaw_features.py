@@ -14,14 +14,22 @@ from .config import JawConfig
 from .rows import NUM_ROWS, validate_batch
 
 FEATURE_NAMES = (
-    "rms_centered",
-    "peak_to_peak",
-    "mean_abs_slope",
-    "envelope_p95",
+    "raw_rms_centered",
+    "raw_peak_to_peak",
+    "raw_mean_abs_slope",
+    "emg_rms",
+    "emg_peak_to_peak",
+    "emg_mean_abs_slope",
+    "emg_envelope_p95",
     "bandpower_20_45",
     "bandpower_45_60",
-    "rms_delta_neutral",
-    "p2p_delta_neutral",
+    "high_low_power_ratio",
+    "raw_rms_delta_neutral",
+    "raw_p2p_delta_neutral",
+    "emg_rms_delta_neutral",
+    "emg_p2p_delta_neutral",
+    "emg_rms_recent_delta",
+    "emg_p2p_recent_delta",
 )
 
 
@@ -75,22 +83,35 @@ def jaw_feature_dict(
     if sample.size == 0:
         return {name: 0.0 for name in FEATURE_NAMES}
     centered = sample - float(np.median(sample))
+    filtered = _emg_filtered(centered, sampling_rate)
     diff = np.diff(centered)
-    envelope = _rms_envelope(centered, sampling_rate)
-    power_20_45 = _bandpower(centered, sampling_rate, 20.0, 45.0)
-    power_45_60 = _bandpower(centered, sampling_rate, 45.0, 60.0)
-    rms = float(np.sqrt(np.mean(centered * centered)))
-    p2p = float(np.max(sample) - np.min(sample))
+    filtered_diff = np.diff(filtered)
+    envelope = _rms_envelope(filtered, sampling_rate)
+    power_20_45 = _bandpower(filtered, sampling_rate, 20.0, 45.0)
+    power_45_60 = _bandpower(filtered, sampling_rate, 45.0, 60.0)
+    raw_rms = float(np.sqrt(np.mean(centered * centered)))
+    emg_rms = float(np.sqrt(np.mean(filtered * filtered)))
+    raw_p2p = float(np.max(sample) - np.min(sample))
+    emg_p2p = float(np.max(filtered) - np.min(filtered))
+    emg_rms_recent_delta, emg_p2p_recent_delta = _recent_feature_deltas(filtered)
     reference = neutral_reference or {}
     return {
-        "rms_centered": rms,
-        "peak_to_peak": p2p,
-        "mean_abs_slope": float(np.mean(np.abs(diff))) if diff.size else 0.0,
-        "envelope_p95": float(np.percentile(envelope, 95)) if envelope.size else 0.0,
+        "raw_rms_centered": raw_rms,
+        "raw_peak_to_peak": raw_p2p,
+        "raw_mean_abs_slope": float(np.mean(np.abs(diff))) if diff.size else 0.0,
+        "emg_rms": emg_rms,
+        "emg_peak_to_peak": emg_p2p,
+        "emg_mean_abs_slope": float(np.mean(np.abs(filtered_diff))) if filtered_diff.size else 0.0,
+        "emg_envelope_p95": float(np.percentile(envelope, 95)) if envelope.size else 0.0,
         "bandpower_20_45": power_20_45,
         "bandpower_45_60": power_45_60,
-        "rms_delta_neutral": rms - float(reference.get("rms_centered", 0.0)),
-        "p2p_delta_neutral": p2p - float(reference.get("peak_to_peak", 0.0)),
+        "high_low_power_ratio": power_45_60 / max(power_20_45, 1e-9),
+        "raw_rms_delta_neutral": raw_rms - float(reference.get("raw_rms_centered", 0.0)),
+        "raw_p2p_delta_neutral": raw_p2p - float(reference.get("raw_peak_to_peak", 0.0)),
+        "emg_rms_delta_neutral": emg_rms - float(reference.get("emg_rms", 0.0)),
+        "emg_p2p_delta_neutral": emg_p2p - float(reference.get("emg_peak_to_peak", 0.0)),
+        "emg_rms_recent_delta": emg_rms_recent_delta,
+        "emg_p2p_recent_delta": emg_p2p_recent_delta,
     }
 
 
@@ -131,8 +152,10 @@ def extract_labeled_clips(
     pre = int(round(config.pre_event_seconds * config.sampling_rate))
     post = int(round(config.post_event_seconds * config.sampling_rate))
     clips: list[JawClip] = []
+    clip_labels = {"jaw_clench", "eyebrow_raise"}
     for label in interval_labels(labels):
-        if label.get("label") not in {"jaw_clench", "jaw_hold"}:
+        label_name = str(label.get("label", ""))
+        if label_name not in clip_labels and not label_name.startswith("hard_negative"):
             continue
         event_start = int(label["start_sample"])
         event_end = int(label["end_sample"])
@@ -218,6 +241,36 @@ def _rms_envelope(values: np.ndarray, sampling_rate: float) -> np.ndarray:
     window = max(1, int(round(0.12 * sampling_rate)))
     kernel = np.ones(window, dtype=float) / window
     return np.sqrt(signal.convolve(values * values, kernel, mode="same"))
+
+
+def _emg_filtered(values: np.ndarray, sampling_rate: float) -> np.ndarray:
+    sample = np.asarray(values, dtype=float)
+    if sample.size == 0 or sampling_rate <= 0:
+        return sample
+    nyquist = sampling_rate * 0.5
+    low = 5.0
+    high = min(60.0, nyquist - 1e-6)
+    if high <= low or sample.size < 24:
+        return sample
+    b, a = signal.butter(3, [low / nyquist, high / nyquist], btype="bandpass")
+    try:
+        return signal.filtfilt(b, a, sample, method="gust")
+    except ValueError:
+        return sample
+
+
+def _recent_feature_deltas(values: np.ndarray) -> tuple[float, float]:
+    sample = np.asarray(values, dtype=float)
+    if sample.size < 4:
+        return 0.0, 0.0
+    midpoint = sample.size // 2
+    early = sample[:midpoint]
+    recent = sample[midpoint:]
+    early_rms = float(np.sqrt(np.mean(early * early))) if early.size else 0.0
+    recent_rms = float(np.sqrt(np.mean(recent * recent))) if recent.size else 0.0
+    early_p2p = float(np.max(early) - np.min(early)) if early.size else 0.0
+    recent_p2p = float(np.max(recent) - np.min(recent)) if recent.size else 0.0
+    return recent_rms - early_rms, recent_p2p - early_p2p
 
 
 def _bandpower(values: np.ndarray, sampling_rate: float, low: float, high: float) -> float:

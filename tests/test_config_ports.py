@@ -31,6 +31,31 @@ def test_invalid_mouse_smoothing_rejected():
         validate_config(config)
 
 
+def test_invalid_mouse_response_rejected():
+    config = AppConfig()
+    config.mouse.response_curve = 0.8
+    with pytest.raises(ValueError):
+        validate_config(config)
+
+
+def test_invalid_mouse_full_tilt_rejected():
+    config = AppConfig()
+    config.mouse.dead_zone_degrees = 2.0
+    config.mouse.full_tilt_degrees = 2.0
+    with pytest.raises(ValueError):
+        validate_config(config)
+
+
+def test_degenerate_cursor_axis_calibration_rejected():
+    config = AppConfig()
+    config.mouse.x_axis_roll = 1.0
+    config.mouse.x_axis_pitch = 0.0
+    config.mouse.y_axis_roll = 2.0
+    config.mouse.y_axis_pitch = 0.0
+    with pytest.raises(ValueError):
+        validate_config(config)
+
+
 def test_invalid_jaw_channel_rejected():
     config = AppConfig()
     config.jaw.channels = [9]

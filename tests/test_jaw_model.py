@@ -18,7 +18,7 @@ def test_jaw_model_training_writes_artifacts(tmp_path):
     labels = [
         {"label": "neutral", "type": "interval", "start_sample": 0, "end_sample": 30},
         {"label": "neutral", "type": "interval", "start_sample": 70, "end_sample": 110},
-        {"label": "jaw_clench", "type": "interval", "start_sample": 40, "end_sample": 50},
+        {"label": "eyebrow_raise", "type": "interval", "start_sample": 40, "end_sample": 50},
     ]
     with (session / "labels.jsonl").open("w", encoding="utf-8") as handle:
         for label in labels:
@@ -31,7 +31,7 @@ def test_jaw_model_training_writes_artifacts(tmp_path):
     assert (profile / "jaw_event.joblib").exists()
     assert (profile / "metadata.json").exists()
     assert prediction.event_confidence >= 0.0
-    assert prediction.state in {"relaxed", "clench"}
+    assert prediction.state in {"relaxed", "eyebrow_raise"}
 
 
 def test_jaw_model_uses_session_sampling_rate_metadata(tmp_path):
@@ -43,7 +43,7 @@ def test_jaw_model_uses_session_sampling_rate_metadata(tmp_path):
     np.savez_compressed(session / "raw.npz", raw=raw)
     labels = [
         {"label": "neutral", "type": "interval", "start_sample": 0, "end_sample": 30},
-        {"label": "jaw_clench", "type": "interval", "start_sample": 40, "end_sample": 50},
+        {"label": "eyebrow_raise", "type": "interval", "start_sample": 40, "end_sample": 50},
     ]
     with (session / "labels.jsonl").open("w", encoding="utf-8") as handle:
         for label in labels:

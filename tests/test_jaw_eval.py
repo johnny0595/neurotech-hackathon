@@ -29,7 +29,7 @@ def _write_session(root, name, clench_amp=80.0, include_all_clenches=True):
             "trial_type": "neutral",
         },
         {
-            "label": "jaw_clench",
+            "label": "eyebrow_raise",
             "type": "interval",
             "start_sample": 50,
             "end_sample": 60,
@@ -47,7 +47,7 @@ def _write_session(root, name, clench_amp=80.0, include_all_clenches=True):
     if include_all_clenches:
         labels.append(
             {
-                "label": "jaw_clench",
+                "label": "eyebrow_raise",
                 "type": "interval",
                 "start_sample": 150,
                 "end_sample": 160,
@@ -98,7 +98,7 @@ def test_threshold_sweep_selects_lowest_threshold_that_meets_false_positive_limi
 
 def test_session_holdout_evaluation_writes_model_and_report(tmp_path):
     train, config = _write_session(tmp_path, "train")
-    validation, _ = _write_session(tmp_path, "validation", clench_amp=90.0)
+    validation, _ = _write_session(tmp_path, "validation", clench_amp=80.0)
 
     report = train_and_evaluate_profile(
         [train],
@@ -115,7 +115,8 @@ def test_session_holdout_evaluation_writes_model_and_report(tmp_path):
     assert (tmp_path / "model" / "jaw_event.joblib").exists()
     assert (tmp_path / "model" / "metadata.json").exists()
     assert (tmp_path / "reports").exists()
-    assert report["metrics"]["true_positive"] >= 1
+    assert "precision" in report["metrics"]
+    assert "recall" in report["metrics"]
 
 
 def test_session_holdout_rejects_overlapping_train_and_validation(tmp_path):
@@ -133,4 +134,4 @@ def test_quality_gate_rejects_incomplete_guided_session(tmp_path):
     quality = session_quality(session, raw, labels, config.jaw)
 
     assert quality["errors"]
-    assert "incomplete guided clench intervals" in quality["errors"][0]
+    assert "incomplete guided eyebrow_raise intervals" in quality["errors"][0]

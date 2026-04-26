@@ -20,7 +20,7 @@ board:
 
 channel_map:
   1: unused
-  2: jaw
+  2: eyebrow
   3: unused
   4: unused
 
@@ -33,12 +33,21 @@ imu:
   invert_roll: false
 
 mouse:
-  dead_zone_degrees: 3.0
+  dead_zone_degrees: 1.25
   speed_px_per_second_per_degree: 70.0
   max_speed_px_per_second: 1400.0
   smoothing: 0.35
+  response_curve: 1.35
+  full_tilt_degrees: 18.0
+  motion_boost_px_per_second_per_degree: 8.0
   invert_x: false
   invert_y: false
+  center_roll_degrees: 0.0
+  center_pitch_degrees: 0.0
+  x_axis_roll: 1.0
+  x_axis_pitch: 0.0
+  y_axis_roll: 0.0
+  y_axis_pitch: 1.0
 
 jaw:
   channels: [2]
@@ -48,8 +57,21 @@ jaw:
   hold_seconds: 3.0
   pre_event_seconds: 0.5
   post_event_seconds: 0.8
-  short_clench_reps: 5
-  hold_reps: 3
-  profile_name: default
+  short_clench_reps: 20
+  hold_reps: 0
+  initial_neutral_seconds: 8.0
+  final_neutral_seconds: 6.0
+  event_min_seconds: 0.35
+  event_max_seconds: 0.50
+  relax_min_seconds: 1.2
+  relax_max_seconds: 2.5
+  hard_negative_reps: 5
+  hard_negative_seconds: 0.75
+  window_seconds: [0.25, 0.35, 0.50]
+  window_step_seconds: 0.05
+  positive_label: eyebrow_raise
+  protocol_version: short_event_v2
+  prompt_seed: 7
+  profile_name: eyebrow
   event_threshold: 0.70
   hold_threshold: 0.70

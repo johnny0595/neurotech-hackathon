@@ -1,0 +1,1 @@
+{"active_exg_channels": [2], "channel_map": {"1": "unused", "2": "jaw", "3": "unused", "4": "unused"}, "end_sample": 45, "gesture": "jaw", "label": "jaw_clench", "start_sample": 0, "type": "interval"}

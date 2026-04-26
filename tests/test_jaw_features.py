@@ -56,4 +56,5 @@ def test_session_feature_payload_contains_clip_features():
 
     assert payload["jaw_channels"] == [2]
     assert payload["clips"][0]["label"] == "jaw_clench"
-    assert payload["clips"][0]["features"]["peak_to_peak"] == 40.0
+    assert payload["clips"][0]["features"]["raw_peak_to_peak"] == 40.0
+    assert payload["clips"][0]["features"]["emg_peak_to_peak"] >= 0.0

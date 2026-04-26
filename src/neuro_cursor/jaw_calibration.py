@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -17,6 +18,29 @@ class JawPhase:
     end_event: str | None = None
     trial_type: str = "neutral"
     trial_index: int = 0
+
+
+EVENT_PROMPTS = {
+    "jaw_clench": "Short jaw clench",
+    "eyebrow_raise": "Eyebrow raise",
+}
+
+EVENT_START_LABELS = {
+    "jaw_clench": "jaw_clench_start",
+    "eyebrow_raise": "eyebrow_raise_start",
+}
+
+EVENT_END_LABELS = {
+    "jaw_clench": "jaw_clench_end",
+    "eyebrow_raise": "eyebrow_raise_end",
+}
+
+HARD_NEGATIVE_PHASES = (
+    ("hard_negative_blink", "Blink naturally"),
+    ("hard_negative_swallow", "Swallow"),
+    ("hard_negative_head_motion", "Small head movement, jaw relaxed"),
+    ("hard_negative_teeth_touch", "Light teeth touch, no clench"),
+)
 
 
 @dataclass(frozen=True)
@@ -35,20 +59,27 @@ class JawLabel:
 
 
 def build_guided_jaw_schedule(config: JawConfig) -> list[JawPhase]:
+    rng = random.Random(config.prompt_seed)
+    event_label = config.positive_label
+    event_prompt = EVENT_PROMPTS.get(event_label, event_label.replace("_", " ").title())
+    start_event = EVENT_START_LABELS.get(event_label, f"{event_label}_start")
+    end_event = EVENT_END_LABELS.get(event_label, f"{event_label}_end")
     phases: list[JawPhase] = [
         JawPhase(
-            prompt="Relax jaw",
-            duration_seconds=config.relax_seconds,
+            prompt="Neutral baseline",
+            duration_seconds=config.initial_neutral_seconds,
             interval_label="neutral",
             trial_type="neutral",
             trial_index=0,
         )
     ]
     for index in range(1, config.short_clench_reps + 1):
+        relax_seconds = rng.uniform(config.relax_min_seconds, config.relax_max_seconds)
+        event_seconds = rng.uniform(config.event_min_seconds, config.event_max_seconds)
         phases.append(
             JawPhase(
-                prompt=f"Relax before short clench {index}",
-                duration_seconds=config.relax_seconds,
+                prompt=f"Relax before trial {index}",
+                duration_seconds=relax_seconds,
                 interval_label="neutral",
                 trial_type="neutral",
                 trial_index=index,
@@ -56,43 +87,53 @@ def build_guided_jaw_schedule(config: JawConfig) -> list[JawPhase]:
         )
         phases.append(
             JawPhase(
-                prompt=f"Short jaw clench {index}",
-                duration_seconds=config.short_clench_seconds,
-                interval_label="jaw_clench",
-                start_event="jaw_clench_start",
-                end_event="jaw_clench_end",
-                trial_type="short_clench",
+                prompt=f"{event_prompt} {index}",
+                duration_seconds=event_seconds,
+                interval_label=event_label,
+                start_event=start_event,
+                end_event=end_event,
+                trial_type=event_label,
                 trial_index=index,
             )
         )
-    for index in range(1, config.hold_reps + 1):
         phases.append(
             JawPhase(
-                prompt=f"Relax before jaw hold {index}",
-                duration_seconds=config.relax_seconds,
+                prompt="Release and relax",
+                duration_seconds=config.post_event_seconds,
                 interval_label="neutral",
                 trial_type="neutral",
                 trial_index=index,
             )
         )
-        phases.append(
-            JawPhase(
-                prompt=f"Hold jaw clench {index}",
-                duration_seconds=config.hold_seconds,
-                interval_label="jaw_hold",
-                start_event="jaw_hold_start",
-                end_event="jaw_hold_end",
-                trial_type="jaw_hold",
-                trial_index=index,
+    hard_index = 0
+    for _ in range(config.hard_negative_reps):
+        for label, prompt in HARD_NEGATIVE_PHASES:
+            hard_index += 1
+            phases.append(
+                JawPhase(
+                    prompt="Relax",
+                    duration_seconds=rng.uniform(config.relax_min_seconds, config.relax_max_seconds),
+                    interval_label="neutral",
+                    trial_type="neutral",
+                    trial_index=hard_index,
+                )
             )
-        )
+            phases.append(
+                JawPhase(
+                    prompt=prompt,
+                    duration_seconds=config.hard_negative_seconds,
+                    interval_label=label,
+                    trial_type=label,
+                    trial_index=hard_index,
+                )
+            )
     phases.append(
         JawPhase(
-            prompt="Relax jaw",
-            duration_seconds=config.relax_seconds,
+            prompt="Final neutral baseline",
+            duration_seconds=config.final_neutral_seconds,
             interval_label="neutral",
             trial_type="neutral",
-            trial_index=config.short_clench_reps + config.hold_reps + 1,
+            trial_index=config.short_clench_reps + hard_index + 1,
         )
     )
     return phases

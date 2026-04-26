@@ -22,16 +22,17 @@ from .jaw_features import (
     neutral_reference,
 )
 from .jaw_model import (
+    CLASSIFIER_NAMES,
     _dump_model,
-    _fit_classifier,
     _median_reference,
     _session_jaw_config,
+    fit_classifier,
     load_session,
     predict_probability,
 )
 
 
-DEFAULT_MAX_FALSE_POSITIVES_PER_MINUTE = 2.0
+DEFAULT_MAX_FALSE_POSITIVES_PER_MINUTE = 0.5
 DEFAULT_MIN_PRECISION = 0.70
 
 
@@ -46,12 +47,20 @@ class JawWindow:
 
 
 def evaluate_from_args(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Train and validate a jaw_clench model with session holdout")
+    parser = argparse.ArgumentParser(description="Train and validate a channel-2 short-event model with session holdout")
     parser.add_argument("--config", default="config/neuro_cursor.yaml")
     parser.add_argument("--train-sessions", nargs="+", required=True)
     parser.add_argument("--validation-sessions", nargs="+", required=True)
     parser.add_argument("--profile", default=None, help="Override profile name")
     parser.add_argument("--profile-dir", default=None, help="Output model directory; defaults to models/<profile>")
+    parser.add_argument("--positive-label", default=None, help="Positive event label, e.g. jaw_clench or eyebrow_raise")
+    parser.add_argument(
+        "--model-candidates",
+        nargs="+",
+        default=list(CLASSIFIER_NAMES),
+        choices=list(CLASSIFIER_NAMES),
+        help="Classifier candidates for the model bakeoff",
+    )
     parser.add_argument("--report-root", default="reports/jaw_eval")
     parser.add_argument(
         "--max-false-positives-per-minute",
@@ -64,18 +73,22 @@ def evaluate_from_args(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     if args.profile:
         config.jaw.profile_name = args.profile
+    if args.positive_label:
+        config.jaw.positive_label = args.positive_label
     report = train_and_evaluate_profile(
         train_sessions=[Path(path) for path in args.train_sessions],
         validation_sessions=[Path(path) for path in args.validation_sessions],
         config=config,
         report_root=Path(args.report_root),
         profile_dir=Path(args.profile_dir) if args.profile_dir else None,
+        model_candidates=list(args.model_candidates),
         max_false_positives_per_minute=args.max_false_positives_per_minute,
         min_precision=args.min_precision,
     )
     print(f"Jaw evaluation report: {report['report_dir']}")
     print(
-        f"status={report['validation_status']} threshold={report['selected_threshold']:.2f} "
+        f"status={report['validation_status']} model={report['selected_model']} "
+        f"label={report['metadata']['positive_label']} threshold={report['selected_threshold']:.2f} "
         f"precision={report['metrics']['precision']:.3f} recall={report['metrics']['recall']:.3f} "
         f"false_pos/min={report['metrics']['false_positives_per_minute']:.2f}"
     )
@@ -88,6 +101,7 @@ def train_and_evaluate_profile(
     config: AppConfig,
     report_root: Path = Path("reports/jaw_eval"),
     profile_dir: Path | None = None,
+    model_candidates: list[str] | None = None,
     max_false_positives_per_minute: float = DEFAULT_MAX_FALSE_POSITIVES_PER_MINUTE,
     min_precision: float = DEFAULT_MIN_PRECISION,
 ) -> dict[str, Any]:
@@ -97,8 +111,9 @@ def train_and_evaluate_profile(
         raise ValueError("at least one validation session is required")
     _ensure_disjoint_sessions(train_sessions, validation_sessions)
 
-    train_payloads = [_load_checked_session(path, config.jaw) for path in train_sessions]
-    validation_payloads = [_load_checked_session(path, config.jaw) for path in validation_sessions]
+    candidates = model_candidates or list(CLASSIFIER_NAMES)
+    train_payloads = [_load_checked_session(path, config.jaw, require_positive=False) for path in train_sessions]
+    validation_payloads = [_load_checked_session(path, config.jaw, require_positive=True) for path in validation_sessions]
     _ensure_compatible_configs(train_payloads + validation_payloads)
 
     neutral = _median_reference([payload["neutral_reference"] for payload in train_payloads])
@@ -107,17 +122,22 @@ def train_and_evaluate_profile(
     train_x = [window.features for window in train_windows]
     train_y = [window.true_label for window in train_windows]
     if len(set(train_y)) < 2:
-        raise ValueError("training set must contain both relaxed and jaw_clench windows")
+        raise ValueError(f"training set must contain both relaxed and {config.jaw.positive_label} windows")
     if len({window.true_label for window in validation_windows}) < 2:
-        raise ValueError("validation set must contain both relaxed and jaw_clench windows")
+        raise ValueError(f"validation set must contain both relaxed and {config.jaw.positive_label} windows")
 
-    model = _fit_classifier(train_x, train_y)
-    scored = _score_windows(model, validation_windows)
-    selected_threshold, sweep = threshold_sweep(
-        scored,
-        max_false_positives_per_minute=max_false_positives_per_minute,
-        min_precision=min_precision,
+    selected = _select_candidate_model(
+        train_x,
+        train_y,
+        validation_windows,
+        candidates,
+        max_false_positives_per_minute,
+        min_precision,
     )
+    model = selected["model"]
+    scored = selected["scored"]
+    selected_threshold = selected["selected_threshold"]
+    sweep = selected["threshold_sweep"]
     metrics = classification_metrics(scored, selected_threshold)
     session_metrics = {
         session: classification_metrics(
@@ -139,7 +159,10 @@ def train_and_evaluate_profile(
     _write_threshold_sweep(report_dir / "threshold_sweep.csv", sweep)
 
     metadata = {
-        "model_kind": "jaw_clench_binary",
+        "model_kind": "short_event_binary",
+        "positive_label": config.jaw.positive_label,
+        "classifier_name": selected["classifier_name"],
+        "model_candidates": candidates,
         "profile_name": config.jaw.profile_name,
         "jaw_channels": list(train_payloads[0]["jaw_config"].channels),
         "sampling_rate_hz": float(train_payloads[0]["jaw_config"].sampling_rate),
@@ -163,7 +186,9 @@ def train_and_evaluate_profile(
         "profile_dir": str(target_dir),
         "validation_status": validation_status,
         "selected_threshold": float(selected_threshold),
+        "selected_model": selected["classifier_name"],
         "metrics": metrics,
+        "model_bakeoff": selected["bakeoff"],
         "session_metrics": session_metrics,
         "feature_separation": feature_summary,
         "threshold_sweep": sweep,
@@ -189,7 +214,7 @@ def discover_usable_sessions(root: Path, config: AppConfig) -> tuple[list[Path],
         try:
             raw, labels = load_session(session_dir)
             jaw_config = _session_jaw_config(session_dir, config.jaw)
-            quality = session_quality(session_dir, raw, labels, jaw_config)
+            quality = session_quality(session_dir, raw, labels, jaw_config, require_positive=True)
         except Exception as exc:
             skipped.append({"session": str(session_dir), "errors": [str(exc)], "warnings": []})
             continue
@@ -198,6 +223,59 @@ def discover_usable_sessions(root: Path, config: AppConfig) -> tuple[list[Path],
         else:
             usable.append(session_dir)
     return usable, skipped
+
+
+def _select_candidate_model(
+    train_x: list[np.ndarray],
+    train_y: list[int],
+    validation_windows: list[JawWindow],
+    candidates: list[str],
+    max_false_positives_per_minute: float,
+    min_precision: float,
+) -> dict[str, Any]:
+    bakeoff: list[dict[str, Any]] = []
+    selected: dict[str, Any] | None = None
+    for classifier_name in candidates:
+        model = fit_classifier(train_x, train_y, classifier_name)
+        scored = _score_windows(model, validation_windows)
+        threshold, sweep = threshold_sweep(
+            scored,
+            max_false_positives_per_minute=max_false_positives_per_minute,
+            min_precision=min_precision,
+        )
+        metrics = classification_metrics(scored, threshold)
+        row = {
+            "classifier_name": classifier_name,
+            "selected_threshold": float(threshold),
+            "metrics": metrics,
+        }
+        bakeoff.append(row)
+        candidate = {
+            "classifier_name": classifier_name,
+            "model": model,
+            "scored": scored,
+            "selected_threshold": float(threshold),
+            "threshold_sweep": sweep,
+            "metrics": metrics,
+            "bakeoff": bakeoff,
+        }
+        if selected is None or _candidate_sort_key(candidate) < _candidate_sort_key(selected):
+            selected = candidate
+    if selected is None:
+        raise ValueError("at least one model candidate is required")
+    selected["bakeoff"] = bakeoff
+    return selected
+
+
+def _candidate_sort_key(candidate: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    metrics = candidate["metrics"]
+    return (
+        float(metrics["false_positive"]),
+        float(metrics["false_positives_per_minute"]),
+        -float(metrics["recall"]),
+        -float(metrics["f1"]),
+        -float(metrics["precision"]),
+    )
 
 
 def classification_metrics(rows: list[dict[str, Any]], threshold: float) -> dict[str, Any]:
@@ -285,10 +363,14 @@ def feature_separation(windows: list[JawWindow]) -> dict[str, Any]:
     return {"usable": usable, "features": rows}
 
 
-def _load_checked_session(session_dir: Path, fallback: JawConfig) -> dict[str, Any]:
+def _load_checked_session(
+    session_dir: Path,
+    fallback: JawConfig,
+    require_positive: bool,
+) -> dict[str, Any]:
     raw, labels = load_session(session_dir)
     jaw_config = _session_jaw_config(session_dir, fallback)
-    quality = session_quality(session_dir, raw, labels, jaw_config)
+    quality = session_quality(session_dir, raw, labels, jaw_config, require_positive=require_positive)
     if quality["errors"]:
         raise ValueError(f"{session_dir} is not usable for jaw validation: {quality['errors']}")
     return {
@@ -301,19 +383,31 @@ def _load_checked_session(session_dir: Path, fallback: JawConfig) -> dict[str, A
     }
 
 
-def session_quality(session_dir: Path, raw: np.ndarray, labels: list[dict[str, Any]], config: JawConfig) -> dict[str, Any]:
+def session_quality(
+    session_dir: Path,
+    raw: np.ndarray,
+    labels: list[dict[str, Any]],
+    config: JawConfig,
+    require_positive: bool = True,
+) -> dict[str, Any]:
     intervals = interval_labels(labels)
     neutral_count = sum(1 for row in intervals if row.get("label") == "neutral")
-    clench_count = sum(1 for row in intervals if row.get("label") == "jaw_clench")
+    positive_count = sum(1 for row in intervals if row.get("label") == config.positive_label)
+    hard_negative_count = sum(
+        1 for row in intervals if str(row.get("label", "")).startswith("hard_negative")
+    )
     guided = _looks_guided(session_dir, labels)
     errors: list[str] = []
     warnings: list[str] = []
     if neutral_count <= 0:
         errors.append("missing neutral intervals")
-    if clench_count <= 0:
-        errors.append("missing jaw_clench intervals")
-    if guided and clench_count < config.short_clench_reps:
-        errors.append(f"incomplete guided clench intervals: expected {config.short_clench_reps}, got {clench_count}")
+    if require_positive and positive_count <= 0:
+        errors.append(f"missing {config.positive_label} intervals")
+    if require_positive and guided and positive_count < config.short_clench_reps:
+        errors.append(
+            f"incomplete guided {config.positive_label} intervals: "
+            f"expected {config.short_clench_reps}, got {positive_count}"
+        )
     values = jaw_signal(raw, config)
     if values.size == 0 or np.count_nonzero(values) == 0:
         errors.append("channel 2 is empty")
@@ -328,7 +422,11 @@ def session_quality(session_dir: Path, raw: np.ndarray, labels: list[dict[str, A
         "session": str(session_dir),
         "samples": int(raw.shape[1]),
         "neutral_intervals": neutral_count,
-        "jaw_clench_intervals": clench_count,
+        "positive_label": config.positive_label,
+        "positive_intervals": positive_count,
+        "hard_negative_intervals": hard_negative_count,
+        "jaw_clench_intervals": sum(1 for row in intervals if row.get("label") == "jaw_clench"),
+        "eyebrow_raise_intervals": sum(1 for row in intervals if row.get("label") == "eyebrow_raise"),
         "guided": guided,
         "timestamp_rate_hz": rate,
         "errors": errors,
@@ -352,24 +450,64 @@ def _session_windows(
 ) -> list[JawWindow]:
     exg = jaw_signal(raw, config)
     rows: list[JawWindow] = []
-    window = max(2, int(round(config.short_clench_seconds * config.sampling_rate)))
     for label in interval_labels(labels):
         start = max(0, int(label["start_sample"]))
         end = min(exg.size, int(label["end_sample"]))
         if end <= start:
             continue
-        if label.get("label") == "jaw_clench":
-            rows.append(_make_window(session_dir, exg, start, end, 1, config, reference))
-        elif label.get("label") == "neutral":
-            if end - start < window:
-                if end - start >= 2:
-                    rows.append(_make_window(session_dir, exg, start, end, 0, config, reference))
-                continue
-            for neg_start in range(start, max(start, end - window + 1), window):
-                neg_end = min(end, neg_start + window)
-                if neg_end - neg_start >= max(2, window // 2):
-                    rows.append(_make_window(session_dir, exg, neg_start, neg_end, 0, config, reference))
+        label_name = str(label.get("label", ""))
+        if label_name == config.positive_label:
+            for win_start, win_end in _positive_window_ranges(start, end, exg.size, config):
+                rows.append(_make_window(session_dir, exg, win_start, win_end, 1, config, reference))
+        elif _is_negative_label(label_name, config.positive_label):
+            for win_start, win_end in _negative_window_ranges(start, end, config):
+                rows.append(_make_window(session_dir, exg, win_start, win_end, 0, config, reference))
     return rows
+
+
+def _positive_window_ranges(
+    start: int,
+    end: int,
+    sample_count: int,
+    config: JawConfig,
+) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    event_len = max(1, end - start)
+    for seconds in config.window_seconds:
+        window = max(2, int(round(seconds * config.sampling_rate)))
+        candidates = {
+            (max(0, end - window), end),
+            (max(0, start - max(0, window - event_len) // 2), min(sample_count, start - max(0, window - event_len) // 2 + window)),
+            (start, min(sample_count, start + window)),
+        }
+        for win_start, win_end in candidates:
+            if win_end - win_start >= max(2, window // 2):
+                ranges.append((win_start, win_end))
+    return sorted(set(ranges))
+
+
+def _negative_window_ranges(start: int, end: int, config: JawConfig) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    step = max(1, int(round(config.window_step_seconds * config.sampling_rate)))
+    for seconds in config.window_seconds:
+        window = max(2, int(round(seconds * config.sampling_rate)))
+        if end - start < window:
+            if end - start >= max(2, window // 2):
+                ranges.append((start, end))
+            continue
+        for win_start in range(start, end - window + 1, step):
+            ranges.append((win_start, win_start + window))
+    return sorted(set(ranges))
+
+
+def _is_negative_label(label: str, positive_label: str) -> bool:
+    if label == positive_label:
+        return False
+    return (
+        label == "neutral"
+        or label.startswith("hard_negative")
+        or label in {"jaw_clench", "eyebrow_raise"}
+    )
 
 
 def _make_window(
@@ -476,7 +614,12 @@ def _ensure_compatible_configs(payloads: list[dict[str, Any]]) -> None:
 
 
 def _looks_guided(session_dir: Path, labels: list[dict[str, Any]]) -> bool:
-    if any(label.get("trial_type") in {"short_clench", "jaw_hold"} for label in labels):
+    guided_trial_types = {"short_clench", "jaw_clench", "eyebrow_raise", "jaw_hold"}
+    if any(
+        label.get("trial_type") in guided_trial_types
+        or str(label.get("trial_type", "")).startswith("hard_negative")
+        for label in labels
+    ):
         return True
     for filename in ("summary.json", "metadata.json"):
         path = session_dir / filename
@@ -485,7 +628,8 @@ def _looks_guided(session_dir: Path, labels: list[dict[str, Any]]) -> bool:
         with path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
         metadata = payload.get("metadata") or payload
-        if metadata.get("label") == "jaw_guided_calibration" or metadata.get("prompt_schedule"):
+        label = str(metadata.get("label", ""))
+        if label == "jaw_guided_calibration" or label.endswith("_guided_calibration") or metadata.get("prompt_schedule"):
             return True
     return False
 

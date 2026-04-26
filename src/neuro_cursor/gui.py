@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from math import hypot
 from pathlib import Path
 
 import numpy as np
@@ -32,12 +33,18 @@ from PySide6.QtWidgets import (
 )
 
 from .brainflow_adapter import BoardConnectionError, KnightBrainFlowAdapter
-from .config import AppConfig, ImuConfig, MouseConfig, load_config
+from .config import AppConfig, ImuConfig, JawConfig, MouseConfig, load_config
 from .diagnostics import active_exg_summary_text, write_snapshot
 from .jaw_calibration import GuidedJawCalibration
 from .jaw_model import JawPrediction, JawPredictor, train_profile
 from .jaw_eval import discover_usable_sessions, train_and_evaluate_profile
-from .mouse_control import MouseVelocity, QtCursorController
+from .mouse_control import (
+    MouseVelocity,
+    QtCursorController,
+    calibrated_axes_from_samples,
+    calibrated_tilt,
+    with_cursor_axis_calibration,
+)
 from .orientation import OrientationEstimator
 from .recording import SessionRecorder
 from .rows import (
@@ -57,6 +64,21 @@ try:
     import pyqtgraph.opengl as gl
 except Exception:  # pragma: no cover - depends on local OpenGL support
     gl = None
+
+
+CURSOR_AXIS_PHASES = (
+    ("neutral", "Hold neutral"),
+    ("left", "Tilt left"),
+    ("right", "Tilt right"),
+    ("up", "Tilt up"),
+    ("down", "Tilt down"),
+)
+CURSOR_AXIS_SETTLE_SECONDS = 1.50
+CURSOR_AXIS_COLLECT_SECONDS = 1.00
+AUTO_ZERO_STILL_SECONDS = 4.0
+AUTO_ZERO_MAX_GYRO_RAD_S = 0.08
+AUTO_ZERO_MAX_DELTA_DEGREES = 0.55
+AUTO_ZERO_MIN_DRIFT_DEGREES = 0.75
 
 
 class StreamWorker(QObject):
@@ -121,6 +143,11 @@ class DiagnosticsWindow(QMainWindow):
         self.last_cursor_step: float | None = None
         self.latest_cursor_velocity = MouseVelocity(0.0, 0.0)
         self.latest_orientation = None
+        self.cursor_axis_phase_index: int | None = None
+        self.cursor_axis_phase_started_at = 0.0
+        self.cursor_axis_samples: dict[str, list[tuple[float, float]]] = {}
+        self.auto_zero_anchor: tuple[float, float, float, float] | None = None
+        self.last_auto_zero_at = 0.0
         self.connection_info: dict[str, object] = {}
         self._block_item = None
         self.jaw_calibration: GuidedJawCalibration | None = None
@@ -147,6 +174,9 @@ class DiagnosticsWindow(QMainWindow):
         self.cursor_timer = QTimer(self)
         self.cursor_timer.timeout.connect(self._drive_cursor)
         self.cursor_timer.start(20)
+
+        self.cursor_axis_timer = QTimer(self)
+        self.cursor_axis_timer.timeout.connect(self._advance_cursor_axis_calibration)
 
         self.escape_shortcut = QShortcut(QKeySequence("Esc"), self)
         self.escape_shortcut.activated.connect(self._escape_disarm_cursor)
@@ -182,18 +212,20 @@ class DiagnosticsWindow(QMainWindow):
         self.stop_button = QPushButton("Stop")
         self.stop_button.clicked.connect(self.stop_stream)
         self.stop_button.setEnabled(False)
-        self.record_button = QPushButton("Start Jaw Recording")
+        self.record_button = QPushButton("Start Eyebrow Recording")
         self.record_button.clicked.connect(self.toggle_recording)
         self.record_button.setEnabled(False)
         self.record_label = QComboBox()
-        self.record_label.addItems(["neutral", "jaw_clench", "test"])
-        self.record_label.setCurrentText("jaw_clench")
-        self.calibration_button = QPushButton("Start Jaw Calibration")
+        self.record_label.addItems(["neutral", "eyebrow_raise", "hard_negative", "test"])
+        self.record_label.setCurrentText("eyebrow_raise")
+        self.calibration_target = QComboBox()
+        self.calibration_target.addItem("Eyebrow raise", "eyebrow_raise")
+        self.calibration_button = QPushButton("Start Eyebrow Calibration")
         self.calibration_button.clicked.connect(self.start_jaw_calibration)
         self.calibration_button.setEnabled(False)
-        self.train_jaw_button = QPushButton("Train Jaw Model")
+        self.train_jaw_button = QPushButton("Train Eyebrow Model")
         self.train_jaw_button.clicked.connect(self.train_jaw_model)
-        self.qa_jaw_button = QPushButton("Jaw Model QA")
+        self.qa_jaw_button = QPushButton("Eyebrow Model QA")
         self.qa_jaw_button.clicked.connect(self.run_jaw_model_qa)
         self.capture_button = QPushButton("Capture Snapshot")
         self.capture_button.clicked.connect(self.capture_snapshot)
@@ -232,12 +264,15 @@ class DiagnosticsWindow(QMainWindow):
         self.invert_checkbox.setChecked(self.config.imu.invert_roll)
         self.invert_checkbox.stateChanged.connect(self._orientation_controls_changed)
 
+        self.cursor_calibration_button = QPushButton("Calibrate Cursor Axes")
+        self.cursor_calibration_button.clicked.connect(self.start_cursor_axis_calibration)
+
         self.arm_cursor_button = QPushButton("Arm Cursor")
         self.arm_cursor_button.clicked.connect(self.toggle_cursor_arm)
 
         self.cursor_dead_zone_spin = QDoubleSpinBox()
-        self.cursor_dead_zone_spin.setDecimals(1)
-        self.cursor_dead_zone_spin.setSingleStep(0.5)
+        self.cursor_dead_zone_spin.setDecimals(2)
+        self.cursor_dead_zone_spin.setSingleStep(0.25)
         self.cursor_dead_zone_spin.setRange(0.0, 45.0)
         self.cursor_dead_zone_spin.setValue(self.config.mouse.dead_zone_degrees)
         self.cursor_dead_zone_spin.valueChanged.connect(self._mouse_controls_changed)
@@ -275,36 +310,41 @@ class DiagnosticsWindow(QMainWindow):
         layout.setColumnStretch(0, 1)
         layout.setColumnStretch(1, 1)
 
-        layout.addWidget(QLabel("Jaw label"), 0, 0)
-        layout.addWidget(self.record_label, 0, 1)
-        layout.addWidget(self.record_button, 1, 0, 1, 2)
-        layout.addWidget(self.calibration_button, 2, 0)
-        layout.addWidget(self.train_jaw_button, 2, 1)
-        layout.addWidget(self.qa_jaw_button, 3, 0, 1, 2)
+        layout.addWidget(QLabel("Protocol"), 0, 0)
+        layout.addWidget(self.calibration_target, 0, 1)
+        layout.addWidget(QLabel("Manual label"), 1, 0)
+        layout.addWidget(self.record_label, 1, 1)
+        layout.addWidget(self.record_button, 2, 0, 1, 2)
+        layout.addWidget(self.calibration_button, 3, 0)
+        layout.addWidget(self.train_jaw_button, 3, 1)
+        layout.addWidget(self.qa_jaw_button, 4, 0, 1, 2)
 
-        layout.addWidget(self.mag_checkbox, 4, 0, 1, 2)
-        layout.addWidget(QLabel("Gyro units"), 5, 0)
-        layout.addWidget(self.gyro_units, 5, 1)
-        layout.addWidget(QLabel("Beta"), 6, 0)
-        layout.addWidget(self.beta_spin, 6, 1)
-        layout.addWidget(QLabel("Pivot Z"), 7, 0)
-        layout.addWidget(self.pivot_spin, 7, 1)
-        layout.addWidget(self.swap_checkbox, 8, 0)
-        layout.addWidget(self.invert_checkbox, 8, 1)
+        layout.addWidget(self.mag_checkbox, 5, 0, 1, 2)
+        layout.addWidget(QLabel("Gyro units"), 6, 0)
+        layout.addWidget(self.gyro_units, 6, 1)
+        layout.addWidget(QLabel("Beta"), 7, 0)
+        layout.addWidget(self.beta_spin, 7, 1)
+        layout.addWidget(QLabel("Pivot Z"), 8, 0)
+        layout.addWidget(self.pivot_spin, 8, 1)
+        layout.addWidget(self.swap_checkbox, 9, 0)
+        layout.addWidget(self.invert_checkbox, 9, 1)
 
-        layout.addWidget(self.arm_cursor_button, 9, 0, 1, 2)
-        layout.addWidget(QLabel("Cursor DZ"), 10, 0)
-        layout.addWidget(self.cursor_dead_zone_spin, 10, 1)
-        layout.addWidget(QLabel("Cursor speed"), 11, 0)
-        layout.addWidget(self.cursor_speed_spin, 11, 1)
-        layout.addWidget(self.cursor_invert_x_checkbox, 12, 0)
-        layout.addWidget(self.cursor_invert_y_checkbox, 12, 1)
+        layout.addWidget(self.cursor_calibration_button, 10, 0, 1, 2)
+        layout.addWidget(self.arm_cursor_button, 11, 0, 1, 2)
+        layout.addWidget(QLabel("Cursor DZ"), 12, 0)
+        layout.addWidget(self.cursor_dead_zone_spin, 12, 1)
+        layout.addWidget(QLabel("Cursor speed"), 13, 0)
+        layout.addWidget(self.cursor_speed_spin, 13, 1)
+        layout.addWidget(self.cursor_invert_x_checkbox, 14, 0)
+        layout.addWidget(self.cursor_invert_y_checkbox, 14, 1)
         for widget in (
             self.record_button,
             self.calibration_button,
             self.train_jaw_button,
             self.qa_jaw_button,
+            self.cursor_calibration_button,
             self.arm_cursor_button,
+            self.calibration_target,
             self.record_label,
             self.gyro_units,
             self.beta_spin,
@@ -316,9 +356,9 @@ class DiagnosticsWindow(QMainWindow):
         return box
 
     def _build_calibration_prompt_box(self) -> QGroupBox:
-        box = QGroupBox("Jaw Calibration Prompt")
+        box = QGroupBox("Eyebrow Calibration Prompt")
         layout = QVBoxLayout(box)
-        self.calibration_prompt_label = QLabel("Start a jaw calibration when the stream is running.")
+        self.calibration_prompt_label = QLabel("Start an eyebrow calibration when the stream is running.")
         self.calibration_prompt_label.setWordWrap(True)
         self.calibration_prompt_label.setAlignment(Qt.AlignCenter)
         self.calibration_prompt_label.setMinimumHeight(86)
@@ -352,7 +392,7 @@ class DiagnosticsWindow(QMainWindow):
         self.euler_label = QLabel("roll 0.0  pitch 0.0  yaw 0.0")
         self.raw_euler_label = QLabel("raw roll 0.0  pitch 0.0  yaw 0.0")
         self.cursor_label = QLabel("disarmed")
-        self.jaw_preview_label = QLabel("jaw model not loaded")
+        self.jaw_preview_label = QLabel("eyebrow model not loaded")
         self.calibration_label = QLabel("calibration idle")
         self.backend_label = QLabel(self.estimator.backend)
 
@@ -366,7 +406,7 @@ class DiagnosticsWindow(QMainWindow):
             ("Corrected", self.euler_label),
             ("Raw", self.raw_euler_label),
             ("Cursor", self.cursor_label),
-            ("Jaw", self.jaw_preview_label),
+            ("Eyebrow", self.jaw_preview_label),
             ("Calibration", self.calibration_label),
             ("Orientation", self.backend_label),
         ]
@@ -468,15 +508,15 @@ class DiagnosticsWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        layout.addWidget(self._build_gl_box(), 2)
+        layout.addWidget(self._build_gl_box(), 5)
         layout.addWidget(self._build_controls_box(), 1)
-        layout.addWidget(self._build_channel_controls_box(), 4)
-        layout.addWidget(self._build_table_box(), 3)
-        layout.addWidget(self._build_log_box(), 2)
+        layout.addWidget(self._build_channel_controls_box(), 1)
+        layout.addWidget(self._build_table_box(), 2)
+        layout.addWidget(self._build_log_box(), 1)
         return panel
 
     def _build_channel_controls_box(self) -> QGroupBox:
-        box = QGroupBox("Jaw EEG Channel")
+        box = QGroupBox("Eyebrow EEG Channel")
         layout = QGridLayout(box)
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(6)
@@ -503,7 +543,7 @@ class DiagnosticsWindow(QMainWindow):
         self.channel_rld_checks[channel] = rld_check
         self.channel_gain_boxes[channel] = gain_box
 
-        channel_label = QLabel(f"EEG channel {channel} feeds jaw clench detection.")
+        channel_label = QLabel(f"EEG channel {channel} feeds eyebrow raise detection.")
         channel_label.setWordWrap(True)
         layout.addWidget(channel_label, 0, 0, 1, 3)
         layout.addWidget(active_check, 1, 0)
@@ -525,6 +565,8 @@ class DiagnosticsWindow(QMainWindow):
             return box
 
         self.gl_view = gl.GLViewWidget()
+        self.gl_view.setMinimumHeight(390)
+        box.setMinimumHeight(430)
         self.gl_view.setCameraPosition(distance=2.8, elevation=20, azimuth=45)
         grid = gl.GLGridItem()
         grid.setSize(3.0, 3.0)
@@ -647,6 +689,7 @@ class DiagnosticsWindow(QMainWindow):
     @Slot()
     def stop_stream(self) -> None:
         self._disarm_cursor("stream stopping")
+        self._cancel_cursor_axis_calibration("stream stopping")
         if self.worker is not None:
             self.worker.stop()
         if self.recorder.is_recording:
@@ -666,12 +709,14 @@ class DiagnosticsWindow(QMainWindow):
     @Slot(str)
     def _handle_error(self, message: str) -> None:
         self._disarm_cursor("stream error")
+        self._cancel_cursor_axis_calibration("stream error")
         self.state_label.setText("error")
         self._log(f"ERROR: {message}")
 
     @Slot()
     def _handle_finished(self) -> None:
         self._disarm_cursor("stream finished")
+        self._cancel_cursor_axis_calibration("stream finished")
         self._log("Stream worker finished")
         self.state_label.setText("idle")
         self.start_button.setEnabled(True)
@@ -694,6 +739,8 @@ class DiagnosticsWindow(QMainWindow):
             orientation_samples.append(self.estimator.update(batch[:, idx]))
         if orientation_samples:
             self.latest_orientation = orientation_samples[-1]
+            self._capture_cursor_axis_samples(orientation_samples)
+            self._track_auto_zero(orientation_samples)
         self.recorder.append(batch, orientation_samples)
         self._update_jaw_calibration()
 
@@ -705,50 +752,63 @@ class DiagnosticsWindow(QMainWindow):
                 "config_path": self.config_path,
                 "connection": self.connection_info,
                 "row_map": ROW_LABELS,
-                "gesture": "jaw",
+                "gesture": self.record_label.currentText(),
                 "label": self.record_label.currentText(),
                 "active_exg_channels": list(self.config.board.active_exg_channels),
             }
             path = self.recorder.start(metadata)
-            self.record_button.setText("Stop Jaw Recording")
+            self.record_button.setText("Stop Eyebrow Recording")
             self.record_label.setEnabled(False)
+            self.calibration_target.setEnabled(False)
             self.calibration_button.setEnabled(False)
-            self._log(f"Jaw recording started: {path} label={self.record_label.currentText()}")
+            self._log(f"Eyebrow recording started: {path} label={self.record_label.currentText()}")
             return
 
         path = self.recorder.stop()
-        self.record_button.setText("Start Jaw Recording")
+        self.record_button.setText("Start Eyebrow Recording")
         self.record_label.setEnabled(True)
+        self.calibration_target.setEnabled(True)
         self.calibration_button.setEnabled(True)
-        self._log(f"Jaw recording saved: {path}")
+        self._log(f"Eyebrow recording saved: {path}")
 
     @Slot()
     def start_jaw_calibration(self) -> None:
         if self.thread is None or self.state_label.text() != "streaming":
-            self._log("Jaw calibration requires an active stream")
+            self._log("Eyebrow calibration requires an active stream")
             return
         if self.recorder.is_recording:
-            self._log("Stop the current recording before starting jaw calibration")
+            self._log("Stop the current recording before starting eyebrow calibration")
             return
-        self.jaw_calibration = GuidedJawCalibration(self.config.jaw)
+        self._cancel_cursor_axis_calibration("eyebrow calibration starting")
+        calibration_config = self._selected_calibration_config()
+        self.jaw_calibration = GuidedJawCalibration(calibration_config)
         self.jaw_calibration.start(0)
+        config_dict = self.config.to_dict()
+        config_dict["jaw"] = calibration_config.__dict__.copy()
         metadata = {
-            "config": self.config.to_dict(),
+            "config": config_dict,
             "config_path": self.config_path,
             "connection": self.connection_info,
             "row_map": ROW_LABELS,
-            "gesture": "jaw",
-            "label": "jaw_guided_calibration",
-            "active_exg_channels": list(self.config.jaw.channels),
+            "gesture": calibration_config.positive_label,
+            "label": f"{calibration_config.positive_label}_guided_calibration",
+            "active_exg_channels": list(calibration_config.channels),
+            "jaw_protocol_version": calibration_config.protocol_version,
             "prompt_schedule": [phase.__dict__ for phase in self.jaw_calibration.schedule],
         }
         path = self.recorder.start(metadata)
         self.record_button.setEnabled(False)
         self.record_label.setEnabled(False)
+        self.calibration_target.setEnabled(False)
         self.calibration_button.setEnabled(False)
         self.calibration_label.setText(self.jaw_calibration.prompt_text(0))
         self._set_calibration_prompt(self.jaw_calibration.prompt_text(0), active=True)
-        self._log(f"Jaw calibration started: {path}")
+        self._log(f"Eyebrow calibration started: {path}")
+
+    def _selected_calibration_config(self) -> JawConfig:
+        config = JawConfig(**self.config.jaw.__dict__)
+        config.positive_label = str(self.calibration_target.currentData() or "eyebrow_raise")
+        return config
 
     @Slot()
     def train_jaw_model(self) -> None:
@@ -785,7 +845,7 @@ class DiagnosticsWindow(QMainWindow):
             self.recorder.add_labels(labels)
             for label in labels:
                 if label.get("type") == "event":
-                    self._log(f"Jaw label: {label['label']} sample={label.get('sample')}")
+                    self._log(f"Eyebrow label: {label['label']} sample={label.get('sample')}")
         prompt = self.jaw_calibration.prompt_text(sample_count)
         self.calibration_label.setText(prompt)
         self._set_calibration_prompt(prompt, active=True)
@@ -801,11 +861,12 @@ class DiagnosticsWindow(QMainWindow):
         self.jaw_calibration = None
         self.record_button.setEnabled(True)
         self.record_label.setEnabled(True)
+        self.calibration_target.setEnabled(True)
         self.calibration_button.setEnabled(True)
         message = "calibration cancelled" if cancelled else "calibration complete"
         self.calibration_label.setText(message)
         self._set_calibration_prompt(message, active=False)
-        self._log(f"Jaw calibration saved: {path}")
+        self._log(f"Eyebrow calibration saved: {path}")
         if not cancelled and path is not None:
             self._train_and_load_jaw_model(path)
 
@@ -815,36 +876,43 @@ class DiagnosticsWindow(QMainWindow):
             self.jaw_predictor = JawPredictor.load(profile, self.config.jaw)
             self.jaw_event_count = 0
             self.last_jaw_event_sample = -10_000_000
-            self._log(f"Jaw clench model trained but not validated: {profile}")
+            self._log(f"Eyebrow model trained but not validated: {profile}")
         except Exception as exc:
-            self._log(f"Jaw model training failed: {exc}")
+            self._log(f"Eyebrow model training failed: {exc}")
 
     @Slot()
     def run_jaw_model_qa(self) -> None:
         sessions_root = Path("data/sessions")
-        sessions, skipped = discover_usable_sessions(sessions_root, self.config)
+        eval_config = AppConfig(
+            board=self.config.board,
+            channel_map=self.config.channel_map,
+            imu=self.config.imu,
+            mouse=self.config.mouse,
+            jaw=self._selected_calibration_config(),
+        )
+        sessions, skipped = discover_usable_sessions(sessions_root, eval_config)
         if skipped:
-            self._log(f"Jaw QA skipped {len(skipped)} unusable session(s)")
+            self._log(f"Eyebrow QA skipped {len(skipped)} unusable session(s)")
         if len(sessions) < 2:
-            self._log("Jaw QA requires at least two complete guided sessions")
+            self._log("Eyebrow QA requires at least two complete guided sessions")
             return
         train_sessions = sessions[:-1]
         validation_sessions = [sessions[-1]]
         try:
-            report = train_and_evaluate_profile(train_sessions, validation_sessions, self.config)
-            self.jaw_predictor = JawPredictor.load(Path(report["profile_dir"]), self.config.jaw)
+            report = train_and_evaluate_profile(train_sessions, validation_sessions, eval_config)
+            self.jaw_predictor = JawPredictor.load(Path(report["profile_dir"]), eval_config.jaw)
             self.jaw_event_count = 0
             self.last_jaw_event_sample = -10_000_000
             metrics = report["metrics"]
             self._log(
-                "Jaw QA "
+                "Eyebrow QA "
                 f"{report['validation_status']}: report={report['report_dir']} "
                 f"threshold={report['selected_threshold']:.2f} "
                 f"precision={metrics['precision']:.2f} recall={metrics['recall']:.2f} "
                 f"fp/min={metrics['false_positives_per_minute']:.2f}"
             )
         except Exception as exc:
-            self._log(f"Jaw QA failed: {exc}")
+            self._log(f"Eyebrow QA failed: {exc}")
 
     def _load_jaw_predictor(self) -> None:
         profile = Path("models") / self.config.jaw.profile_name
@@ -857,6 +925,7 @@ class DiagnosticsWindow(QMainWindow):
     @Slot()
     def zero_orientation(self) -> None:
         self.estimator.zero_level()
+        self.auto_zero_anchor = None
         self._log("Orientation zeroed")
 
     @Slot()
@@ -908,10 +977,197 @@ class DiagnosticsWindow(QMainWindow):
             speed_px_per_second_per_degree=float(self.cursor_speed_spin.value()),
             max_speed_px_per_second=self.config.mouse.max_speed_px_per_second,
             smoothing=self.config.mouse.smoothing,
+            response_curve=self.config.mouse.response_curve,
+            full_tilt_degrees=self.config.mouse.full_tilt_degrees,
+            motion_boost_px_per_second_per_degree=(
+                self.config.mouse.motion_boost_px_per_second_per_degree
+            ),
             invert_x=self.cursor_invert_x_checkbox.isChecked(),
             invert_y=self.cursor_invert_y_checkbox.isChecked(),
+            center_roll_degrees=self.config.mouse.center_roll_degrees,
+            center_pitch_degrees=self.config.mouse.center_pitch_degrees,
+            x_axis_roll=self.config.mouse.x_axis_roll,
+            x_axis_pitch=self.config.mouse.x_axis_pitch,
+            y_axis_roll=self.config.mouse.y_axis_roll,
+            y_axis_pitch=self.config.mouse.y_axis_pitch,
         )
         self.cursor_controller.update_config(self.config.mouse)
+
+    @Slot()
+    def start_cursor_axis_calibration(self) -> None:
+        if self.thread is None or self.state_label.text() != "streaming":
+            self._log("Cursor axis calibration requires an active stream")
+            return
+        if self.latest_orientation is None:
+            self._log("Cursor axis calibration needs orientation samples first")
+            return
+        if self.jaw_calibration is not None or self.recorder.is_recording:
+            self._log("Stop eyebrow calibration or recording before calibrating cursor axes")
+            return
+
+        self._disarm_cursor("cursor axis calibration")
+        self.estimator.zero_level()
+        self.cursor_axis_phase_index = 0
+        self.cursor_axis_phase_started_at = time.monotonic()
+        self.cursor_axis_samples = {name: [] for name, _ in CURSOR_AXIS_PHASES}
+        self.cursor_calibration_button.setEnabled(False)
+        self.arm_cursor_button.setEnabled(False)
+        self.cursor_axis_timer.start(50)
+        self._set_cursor_axis_phase_prompt()
+        self._log("Cursor axis calibration started: neutral, left, right, up, down")
+
+    def _capture_cursor_axis_samples(self, orientation_samples) -> None:
+        if self.cursor_axis_phase_index is None:
+            return
+        elapsed = time.monotonic() - self.cursor_axis_phase_started_at
+        if elapsed < CURSOR_AXIS_SETTLE_SECONDS:
+            return
+        if elapsed > CURSOR_AXIS_SETTLE_SECONDS + CURSOR_AXIS_COLLECT_SECONDS:
+            return
+        phase_name, _ = CURSOR_AXIS_PHASES[self.cursor_axis_phase_index]
+        self.cursor_axis_samples[phase_name].extend(
+            (float(sample.roll), float(sample.pitch)) for sample in orientation_samples
+        )
+
+    def _track_auto_zero(self, orientation_samples) -> None:
+        if self.cursor_axis_phase_index is not None or not orientation_samples:
+            self.auto_zero_anchor = None
+            return
+
+        sample = orientation_samples[-1]
+        gyro_norm = float(np.linalg.norm(np.array(sample.gyro, dtype=float)))
+        if gyro_norm > AUTO_ZERO_MAX_GYRO_RAD_S:
+            self.auto_zero_anchor = None
+            return
+
+        if self.cursor_armed:
+            tilt_x, tilt_y = calibrated_tilt(sample.roll, sample.pitch, self.config.mouse)
+            active_limit = max(self.config.mouse.dead_zone_degrees + 0.75, 2.0)
+            if hypot(tilt_x, tilt_y) > active_limit:
+                self.auto_zero_anchor = None
+                return
+
+        drift = hypot(sample.roll, sample.pitch)
+        if drift < AUTO_ZERO_MIN_DRIFT_DEGREES:
+            self.auto_zero_anchor = None
+            return
+
+        now = time.monotonic()
+        if self.auto_zero_anchor is None:
+            self.auto_zero_anchor = (sample.roll, sample.pitch, sample.yaw, now)
+            return
+
+        anchor_roll, anchor_pitch, anchor_yaw, anchor_started = self.auto_zero_anchor
+        max_delta = max(
+            abs(sample.roll - anchor_roll),
+            abs(sample.pitch - anchor_pitch),
+            abs(self._angle_delta_degrees(sample.yaw, anchor_yaw)),
+        )
+        if max_delta > AUTO_ZERO_MAX_DELTA_DEGREES:
+            self.auto_zero_anchor = (sample.roll, sample.pitch, sample.yaw, now)
+            return
+
+        if (
+            now - anchor_started >= AUTO_ZERO_STILL_SECONDS
+            and now - self.last_auto_zero_at >= AUTO_ZERO_STILL_SECONDS
+        ):
+            self.estimator.zero_level()
+            if self.cursor_armed:
+                self.cursor_controller.reset()
+                self.latest_cursor_velocity = MouseVelocity(0.0, 0.0)
+                self.last_cursor_step = now
+            self.auto_zero_anchor = None
+            self.last_auto_zero_at = now
+            self._log("Orientation auto-zeroed after stillness")
+
+    def _angle_delta_degrees(self, current: float, reference: float) -> float:
+        return ((current - reference + 180.0) % 360.0) - 180.0
+
+    @Slot()
+    def _advance_cursor_axis_calibration(self) -> None:
+        if self.cursor_axis_phase_index is None:
+            self.cursor_axis_timer.stop()
+            return
+
+        phase_name, _ = CURSOR_AXIS_PHASES[self.cursor_axis_phase_index]
+        elapsed = time.monotonic() - self.cursor_axis_phase_started_at
+        phase_seconds = CURSOR_AXIS_SETTLE_SECONDS + CURSOR_AXIS_COLLECT_SECONDS
+        if elapsed < phase_seconds:
+            return
+
+        if len(self.cursor_axis_samples.get(phase_name, [])) < 3:
+            self._cancel_cursor_axis_calibration("not enough orientation samples")
+            return
+
+        self.cursor_axis_phase_index += 1
+        if self.cursor_axis_phase_index >= len(CURSOR_AXIS_PHASES):
+            self._finish_cursor_axis_calibration()
+            return
+
+        self.cursor_axis_phase_started_at = time.monotonic()
+        self._set_cursor_axis_phase_prompt()
+
+    def _set_cursor_axis_phase_prompt(self) -> None:
+        if self.cursor_axis_phase_index is None:
+            return
+        _, prompt = CURSOR_AXIS_PHASES[self.cursor_axis_phase_index]
+        self.calibration_label.setText(f"cursor axes: {prompt}")
+        self._set_calibration_prompt(f"Cursor axes: {prompt}", active=True)
+        self._log(f"Cursor axis calibration: {prompt}")
+
+    def _finish_cursor_axis_calibration(self) -> None:
+        try:
+            means = {
+                name: self._mean_roll_pitch(samples)
+                for name, samples in self.cursor_axis_samples.items()
+            }
+            calibration = calibrated_axes_from_samples(
+                means["neutral"],
+                means["left"],
+                means["right"],
+                means["up"],
+                means["down"],
+            )
+            self.config.mouse = with_cursor_axis_calibration(self.config.mouse, calibration)
+            self.cursor_controller.update_config(self.config.mouse)
+            self.calibration_label.setText("cursor axes calibrated")
+            self._set_calibration_prompt("Cursor axes calibrated", active=False)
+            self._log(
+                "Cursor axes calibrated: "
+                f"center=({calibration.center_roll_degrees:.2f}, "
+                f"{calibration.center_pitch_degrees:.2f}) "
+                f"x=({calibration.x_axis_roll:.2f}, {calibration.x_axis_pitch:.2f}) "
+                f"y=({calibration.y_axis_roll:.2f}, {calibration.y_axis_pitch:.2f})"
+            )
+        except ValueError as exc:
+            self._log(f"Cursor axis calibration failed: {exc}")
+            self.calibration_label.setText("cursor axis calibration failed")
+            self._set_calibration_prompt("Cursor axis calibration failed", active=False)
+        finally:
+            self.cursor_axis_timer.stop()
+            self.cursor_axis_phase_index = None
+            self.cursor_axis_samples = {}
+            self.cursor_calibration_button.setEnabled(True)
+            self.arm_cursor_button.setEnabled(True)
+
+    def _cancel_cursor_axis_calibration(self, reason: str) -> None:
+        if self.cursor_axis_phase_index is None:
+            return
+        self.cursor_axis_timer.stop()
+        self.cursor_axis_phase_index = None
+        self.cursor_axis_samples = {}
+        self.cursor_calibration_button.setEnabled(True)
+        self.arm_cursor_button.setEnabled(True)
+        self.calibration_label.setText("cursor axis calibration cancelled")
+        self._set_calibration_prompt("Cursor axis calibration cancelled", active=False)
+        self._log(f"Cursor axis calibration cancelled: {reason}")
+
+    def _mean_roll_pitch(self, samples: list[tuple[float, float]]) -> tuple[float, float]:
+        if not samples:
+            raise ValueError("cursor calibration missing orientation samples")
+        roll = sum(sample[0] for sample in samples) / len(samples)
+        pitch = sum(sample[1] for sample in samples) / len(samples)
+        return roll, pitch
 
     @Slot()
     def toggle_cursor_arm(self) -> None:
@@ -1009,11 +1265,12 @@ class DiagnosticsWindow(QMainWindow):
 
     def _refresh_jaw_preview(self) -> None:
         if self.jaw_predictor is None:
-            self.jaw_preview_label.setText("model not loaded")
+            self.jaw_preview_label.setText("eyebrow model not loaded")
             return
-        needed = max(2, int(round(self.config.jaw.short_clench_seconds * self.config.jaw.sampling_rate)))
+        window_seconds = self.jaw_predictor.config.window_seconds or [self.jaw_predictor.config.short_clench_seconds]
+        needed = max(2, int(round(min(window_seconds) * self.jaw_predictor.config.sampling_rate)))
         if self.buffer.shape[1] < needed:
-            self.jaw_preview_label.setText("waiting for jaw samples")
+            self.jaw_preview_label.setText("waiting for eyebrow samples")
             return
         self.latest_jaw_prediction = self.jaw_predictor.predict(self.buffer)
         current_sample = self.total_packets
@@ -1025,9 +1282,10 @@ class DiagnosticsWindow(QMainWindow):
             self.jaw_event_count += 1
             self.last_jaw_event_sample = current_sample
         status = "validated" if self.jaw_predictor.validated else "unvalidated"
+        target = self.jaw_predictor.positive_label.replace("_", " ")
         self.jaw_preview_label.setText(
             f"{self.latest_jaw_prediction.state}  "
-            f"clench {self.latest_jaw_prediction.event_confidence:.2f}  "
+            f"{target} {self.latest_jaw_prediction.event_confidence:.2f}  "
             f"thr {self.jaw_predictor.threshold:.2f}  "
             f"count {self.jaw_event_count}  {status}"
         )

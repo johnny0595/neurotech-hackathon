@@ -20,6 +20,14 @@ from .jaw_features import (
     read_labels,
 )
 
+CLASSIFIER_NAMES = (
+    "extra_trees",
+    "random_forest",
+    "hist_gradient_boosting",
+    "logistic_regression",
+    "emg_rms_threshold",
+)
+
 
 @dataclass(frozen=True)
 class JawPrediction:
@@ -49,11 +57,13 @@ def train_profile(
     references: list[dict[str, float]] = []
     session_rates: list[float] = []
     session_channels: list[list[int]] = []
+    positive_labels: list[str] = []
     for session_dir in session_dirs:
         raw, labels = load_session(session_dir)
         jaw_config = _session_jaw_config(session_dir, config.jaw)
         session_rates.append(jaw_config.sampling_rate)
         session_channels.append(list(jaw_config.channels))
+        positive_labels.append(jaw_config.positive_label)
         reference = neutral_reference(raw, labels, jaw_config)
         references.append(reference)
         exg = jaw_signal(raw, jaw_config)
@@ -64,8 +74,10 @@ def train_profile(
         raise ValueError(f"cannot train one jaw model from mixed sample rates: {session_rates}")
     if len({tuple(channels) for channels in session_channels}) > 1:
         raise ValueError(f"cannot train one jaw model from mixed jaw channels: {session_channels}")
+    if len(set(positive_labels)) > 1:
+        raise ValueError(f"cannot train one jaw model from mixed positive labels: {positive_labels}")
     if not any(event_y):
-        raise ValueError("jaw model training requires at least one jaw_clench interval")
+        raise ValueError(f"jaw model training requires at least one {positive_labels[0]} interval")
     if not any(label == 0 for label in event_y):
         raise ValueError("jaw model training requires at least one neutral interval")
 
@@ -74,7 +86,9 @@ def train_profile(
 
     neutral = _median_reference(references)
     metadata = {
-        "model_kind": "jaw_clench_binary",
+        "model_kind": "short_event_binary",
+        "positive_label": positive_labels[0],
+        "classifier_name": "random_forest",
         "profile_name": config.jaw.profile_name,
         "jaw_channels": session_channels[0],
         "sampling_rate_hz": session_rates[0],
@@ -100,39 +114,63 @@ class JawPredictor:
         config: JawConfig,
         threshold: float | None = None,
         validated: bool = False,
+        positive_label: str = "jaw_clench",
     ) -> None:
         self.event_model = event_model
         self.neutral = neutral
         self.config = config
         self.threshold = float(threshold if threshold is not None else config.event_threshold)
         self.validated = bool(validated)
+        self.positive_label = positive_label
 
     @classmethod
     def load(cls, profile_dir: Path, config: JawConfig) -> "JawPredictor":
         metadata_path = profile_dir / "metadata.json"
         with metadata_path.open("r", encoding="utf-8") as handle:
             metadata = json.load(handle)
+        stored_features = metadata.get("feature_names")
+        if stored_features and list(stored_features) != list(FEATURE_NAMES):
+            raise ValueError(
+                "jaw model feature set is outdated; retrain the jaw model with the current app"
+            )
         model_config = JawConfig(**config.__dict__)
         if metadata.get("jaw_channels"):
             model_config.channels = [int(channel) for channel in metadata["jaw_channels"]]
         if metadata.get("sampling_rate_hz"):
             model_config.sampling_rate = float(metadata["sampling_rate_hz"])
+        positive_label = str(metadata.get("positive_label", model_config.positive_label))
+        model_config.positive_label = positive_label
         return cls(
             event_model=_load_model(profile_dir / "jaw_event.joblib"),
             neutral=dict(metadata.get("neutral_reference") or {}),
             config=model_config,
             threshold=float(metadata.get("event_threshold", model_config.event_threshold)),
             validated=str(metadata.get("validation_status", "")).lower() == "passed",
+            positive_label=positive_label,
         )
 
     def predict(self, raw: np.ndarray) -> JawPrediction:
         exg = jaw_signal(raw, self.config)
-        event_samples = max(2, int(round(self.config.short_clench_seconds * self.config.sampling_rate)))
-        event_conf = _predict_probability(
-            self.event_model,
-            jaw_feature_vector(exg[-event_samples:], self.config.sampling_rate, self.neutral),
-        )
-        state = "clench" if event_conf >= self.threshold else "relaxed"
+        probabilities: list[float] = []
+        for seconds in self.config.window_seconds:
+            event_samples = max(2, int(round(seconds * self.config.sampling_rate)))
+            if exg.size >= 2:
+                probabilities.append(
+                    _predict_probability(
+                        self.event_model,
+                        jaw_feature_vector(exg[-event_samples:], self.config.sampling_rate, self.neutral),
+                    )
+                )
+        if not probabilities:
+            event_samples = max(2, int(round(self.config.short_clench_seconds * self.config.sampling_rate)))
+            probabilities.append(
+                _predict_probability(
+                    self.event_model,
+                    jaw_feature_vector(exg[-event_samples:], self.config.sampling_rate, self.neutral),
+                )
+            )
+        event_conf = max(probabilities)
+        state = self.positive_label if event_conf >= self.threshold else "relaxed"
         return JawPrediction(event_confidence=event_conf, state=state)
 
 
@@ -161,13 +199,13 @@ def jaw_clench_training_examples(
 ) -> list[tuple[np.ndarray, int]]:
     rows: list[tuple[np.ndarray, int]] = []
     intervals = interval_labels(labels)
-    positive_intervals = [row for row in intervals if row.get("label") == "jaw_clench"]
-    neutral_intervals = [row for row in intervals if row.get("label") == "neutral"]
+    positive_intervals = [row for row in intervals if row.get("label") == config.positive_label]
+    negative_intervals = [row for row in intervals if _is_negative_label(str(row.get("label")), config.positive_label)]
     for row in positive_intervals:
         start, end = int(row["start_sample"]), int(row["end_sample"])
         rows.append((jaw_feature_vector(exg[start:end], config.sampling_rate, reference), 1))
     window = max(2, int(round(config.short_clench_seconds * config.sampling_rate)))
-    for row in neutral_intervals:
+    for row in negative_intervals:
         start, end = int(row["start_sample"]), int(row["end_sample"])
         if end - start < window:
             if end - start >= 2:
@@ -178,6 +216,16 @@ def jaw_clench_training_examples(
             if neg_end - neg_start >= max(2, window // 2):
                 rows.append((jaw_feature_vector(exg[neg_start:neg_end], config.sampling_rate, reference), 0))
     return rows
+
+
+def _is_negative_label(label: str, positive_label: str) -> bool:
+    if label == positive_label:
+        return False
+    return (
+        label == "neutral"
+        or label.startswith("hard_negative")
+        or label in {"jaw_clench", "eyebrow_raise"}
+    )
 
 
 def _session_jaw_config(session_dir: Path, fallback: JawConfig) -> JawConfig:
@@ -199,17 +247,54 @@ def _session_jaw_config(session_dir: Path, fallback: JawConfig) -> JawConfig:
 
 
 def _fit_classifier(features: list[np.ndarray], labels: list[int]) -> Any:
+    return fit_classifier(features, labels, "random_forest")
+
+
+def fit_classifier(features: list[np.ndarray], labels: list[int], classifier_name: str) -> Any:
     if not features:
         return ConstantProbability(0.0)
     y = np.asarray(labels, dtype=int)
     if len(set(y.tolist())) < 2:
         return ConstantProbability(float(np.mean(y)))
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import StandardScaler
-
     x = np.vstack(features)
-    return make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000, class_weight="balanced")).fit(x, y)
+    if classifier_name == "extra_trees":
+        from sklearn.ensemble import ExtraTreesClassifier
+
+        return ExtraTreesClassifier(
+            n_estimators=350,
+            min_samples_leaf=2,
+            class_weight="balanced",
+            random_state=7,
+        ).fit(x, y)
+    if classifier_name == "random_forest":
+        from sklearn.ensemble import RandomForestClassifier
+
+        return RandomForestClassifier(
+            n_estimators=250,
+            min_samples_leaf=3,
+            class_weight="balanced",
+            random_state=7,
+        ).fit(x, y)
+    if classifier_name == "hist_gradient_boosting":
+        from sklearn.ensemble import HistGradientBoostingClassifier
+
+        return HistGradientBoostingClassifier(
+            max_iter=250,
+            learning_rate=0.04,
+            random_state=7,
+        ).fit(x, y)
+    if classifier_name == "logistic_regression":
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        return make_pipeline(
+            StandardScaler(),
+            LogisticRegression(max_iter=1000, class_weight="balanced"),
+        ).fit(x, y)
+    if classifier_name == "emg_rms_threshold":
+        return FeatureThresholdClassifier("emg_rms_delta_neutral").fit(x, y)
+    raise ValueError(f"unknown jaw classifier {classifier_name!r}")
 
 
 class ConstantProbability:
@@ -219,6 +304,39 @@ class ConstantProbability:
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
         n = x.shape[0]
         return np.tile(np.array([[1.0 - self.probability, self.probability]], dtype=float), (n, 1))
+
+
+class FeatureThresholdClassifier:
+    def __init__(self, feature_name: str) -> None:
+        self.feature_name = feature_name
+        self.feature_index = FEATURE_NAMES.index(feature_name)
+        self.threshold = 0.0
+        self.scale = 1.0
+        self.direction = 1.0
+
+    def fit(self, x: np.ndarray, y: np.ndarray) -> "FeatureThresholdClassifier":
+        values = np.asarray(x[:, self.feature_index], dtype=float)
+        labels = np.asarray(y, dtype=int)
+        positives = values[labels == 1]
+        negatives = values[labels == 0]
+        if positives.size == 0 or negatives.size == 0:
+            self.threshold = float(np.median(values)) if values.size else 0.0
+            self.scale = 1.0
+            self.direction = 1.0
+            return self
+        pos_median = float(np.median(positives))
+        neg_median = float(np.median(negatives))
+        self.threshold = (pos_median + neg_median) * 0.5
+        self.direction = 1.0 if pos_median >= neg_median else -1.0
+        mad = float(np.median(np.abs(values - np.median(values))))
+        self.scale = max(mad, float(np.std(values)), 1e-9)
+        return self
+
+    def predict_proba(self, x: np.ndarray) -> np.ndarray:
+        values = np.asarray(x[:, self.feature_index], dtype=float)
+        logits = self.direction * (values - self.threshold) / self.scale
+        probabilities = 1.0 / (1.0 + np.exp(-np.clip(logits, -60.0, 60.0)))
+        return np.column_stack([1.0 - probabilities, probabilities])
 
 
 def _predict_probability(model: Any, vector: np.ndarray) -> float:

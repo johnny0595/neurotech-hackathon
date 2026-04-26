@@ -89,10 +89,10 @@ def test_manual_csv_labels_make_neutral_complement():
 
     labels = _manual_labels_from_args(Args(), config, samples=50)
     neutral = [label for label in labels if label["label"] == "neutral"]
-    clench = [label for label in labels if label["label"] == "jaw_clench"][0]
+    event = [label for label in labels if label["label"] == "eyebrow_raise"][0]
 
-    assert clench["start_sample"] == 18
-    assert clench["end_sample"] == 23
+    assert event["start_sample"] == 18
+    assert event["end_sample"] == 23
     assert neutral == [
         {
             "label": "neutral",

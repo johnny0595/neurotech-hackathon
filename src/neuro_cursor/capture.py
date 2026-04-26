@@ -19,7 +19,15 @@ from .diagnostics import exg_channel_status, snapshot_payload
 from .jaw_features import session_feature_payload, write_clips_npz, write_labels
 from .rows import EXG_ROWS, NUM_ROWS, PACKAGE_ROW, ROW_LABELS, TIMESTAMP_ROW
 
-DEFAULT_JAW_LABELS = {"neutral", "jaw_clench", "jaw_hold", "jaw_release", "test"}
+DEFAULT_JAW_LABELS = {
+    "neutral",
+    "jaw_clench",
+    "eyebrow_raise",
+    "hard_negative",
+    "jaw_hold",
+    "jaw_release",
+    "test",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,8 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--from-csv", help="Import an 8-column EXG CSV instead of reading hardware")
     parser.add_argument("--sampling-rate", type=float, default=None, help="CSV sampling rate")
     parser.add_argument("--duration-seconds", type=float, default=30.0, help="CSV duration for rate inference")
-    parser.add_argument("--event-times", default="", help="Comma-separated short clench center times in seconds")
-    parser.add_argument("--hold-intervals", default="", help="Comma-separated hold intervals as start:end seconds")
+    parser.add_argument("--positive-label", default=None, help="Positive event label for --event-times")
+    parser.add_argument("--event-times", default="", help="Comma-separated positive event center times in seconds")
+    parser.add_argument("--hold-intervals", default="", help="Legacy comma-separated hold intervals as start:end seconds")
     return parser
 
 
@@ -157,6 +166,8 @@ def write_capture(
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
+    if args.positive_label:
+        config.jaw.positive_label = args.positive_label
     if args.from_csv:
         try:
             csv_data = np.loadtxt(args.from_csv, delimiter=",")
@@ -281,6 +292,8 @@ def _resolve_csv_sampling_rate(
 def _manual_labels_from_args(args: argparse.Namespace, config: JawConfig, samples: int) -> list[dict[str, Any]]:
     labels: list[dict[str, Any]] = []
     positive_intervals: list[tuple[int, int]] = []
+    positive_label = config.positive_label
+    start_event, end_event = _event_names(positive_label)
     for index, center in enumerate(_parse_times(args.event_times), start=1):
         duration = max(1, int(round(config.short_clench_seconds * config.sampling_rate)))
         center_sample = int(round(center * config.sampling_rate))
@@ -288,7 +301,7 @@ def _manual_labels_from_args(args: argparse.Namespace, config: JawConfig, sample
         end = min(samples, start + duration)
         if end > start:
             positive_intervals.append((start, end))
-        labels.extend(_event_interval_labels("jaw_clench", "jaw_clench_start", "jaw_clench_end", start, end, index, config))
+        labels.extend(_event_interval_labels(positive_label, start_event, end_event, start, end, index, config))
     for index, (start_s, end_s) in enumerate(_parse_intervals(args.hold_intervals), start=1):
         start = max(0, int(round(start_s * config.sampling_rate)))
         end = min(samples, int(round(end_s * config.sampling_rate)))
@@ -343,7 +356,12 @@ def _event_interval_labels(
 ) -> list[dict[str, Any]]:
     if end <= start:
         return []
-    trial_type = "short_clench" if label == "jaw_clench" else "jaw_hold"
+    if label == "jaw_hold":
+        trial_type = "jaw_hold"
+    elif label == "jaw_clench":
+        trial_type = "short_clench"
+    else:
+        trial_type = label
     return [
         {
             "label": start_event,
@@ -373,6 +391,14 @@ def _event_interval_labels(
             "trial_index": index,
         },
     ]
+
+
+def _event_names(label: str) -> tuple[str, str]:
+    if label == "jaw_clench":
+        return "jaw_clench_start", "jaw_clench_end"
+    if label == "eyebrow_raise":
+        return "eyebrow_raise_start", "eyebrow_raise_end"
+    return f"{label}_start", f"{label}_end"
 
 
 def _parse_times(value: str) -> list[float]:

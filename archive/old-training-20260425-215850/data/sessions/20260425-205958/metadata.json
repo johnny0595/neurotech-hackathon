@@ -1,0 +1,299 @@
+{
+  "active_exg_channels": [
+    2
+  ],
+  "config": {
+    "board": {
+      "active_exg_channels": [
+        2
+      ],
+      "buffer_size": 450000,
+      "channel_gains": {
+        "1": 12,
+        "2": 12,
+        "3": 12,
+        "4": 12,
+        "5": 12,
+        "6": 12,
+        "7": 12,
+        "8": 12
+      },
+      "config_command_delay_seconds": 0.5,
+      "configure_channels": true,
+      "gain": 12,
+      "id": "NEUROPAWN_KNIGHT_BOARD_IMU",
+      "rld_channels": [
+        2
+      ],
+      "serial_port": "/dev/cu.usbserial-A5069RR4",
+      "stream_settle_seconds": 2.0
+    },
+    "channel_map": {
+      "1": "unused",
+      "2": "jaw",
+      "3": "unused",
+      "4": "unused"
+    },
+    "imu": {
+      "beta": 0.2,
+      "gyro_units": "auto",
+      "invert_roll": false,
+      "pivot_z": 0.25,
+      "swap_pitch_roll": false,
+      "use_magnetometer": false
+    },
+    "jaw": {
+      "channels": [
+        2
+      ],
+      "event_threshold": 0.7,
+      "hold_reps": 3,
+      "hold_seconds": 3.0,
+      "hold_threshold": 0.7,
+      "post_event_seconds": 0.8,
+      "pre_event_seconds": 0.5,
+      "profile_name": "default",
+      "relax_seconds": 2.0,
+      "sampling_rate": 125.0,
+      "short_clench_reps": 5,
+      "short_clench_seconds": 0.5
+    },
+    "mouse": {
+      "dead_zone_degrees": 3.0,
+      "invert_x": false,
+      "invert_y": false,
+      "max_speed_px_per_second": 1400.0,
+      "smoothing": 0.35,
+      "speed_px_per_second_per_degree": 70.0
+    }
+  },
+  "config_path": "config/neuro_cursor.yaml",
+  "connection": {
+    "board_descr": {
+      "eeg_channels": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "marker_channel": 21,
+      "name": "KnightIMU",
+      "num_rows": 22,
+      "other_channels": [
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "package_num_channel": 0,
+      "sampling_rate": 125,
+      "timestamp_channel": 20
+    },
+    "brainflow_version": "5.21.0",
+    "port": "/dev/cu.usbserial-A5069RR4"
+  },
+  "gesture": "jaw",
+  "label": "jaw_guided_calibration",
+  "orientation_samples": 3936,
+  "prompt_schedule": [
+    {
+      "duration_seconds": 2.0,
+      "end_event": null,
+      "interval_label": "neutral",
+      "prompt": "Relax jaw",
+      "start_event": null,
+      "trial_index": 0,
+      "trial_type": "neutral"
+    },
+    {
+      "duration_seconds": 2.0,
+      "end_event": null,
+      "interval_label": "neutral",
+      "prompt": "Relax before short clench 1",
+      "start_event": null,
+      "trial_index": 1,
+      "trial_type": "neutral"
+    },
+    {
+      "duration_seconds": 0.5,
+      "end_event": "jaw_clench_end",
+      "interval_label": "jaw_clench",
+      "prompt": "Short jaw clench 1",
+      "start_event": "jaw_clench_start",
+      "trial_index": 1,
+      "trial_type": "short_clench"
+    },
+    {
+      "duration_seconds": 2.0,
+      "end_event": null,
+      "interval_label": "neutral",
+      "prompt": "Relax before short clench 2",
+      "start_event": null,
+      "trial_index": 2,
+      "trial_type": "neutral"
+    },
+    {
+      "duration_seconds": 0.5,
+      "end_event": "jaw_clench_end",
+      "interval_label": "jaw_clench",
+      "prompt": "Short jaw clench 2",
+      "start_event": "jaw_clench_start",
+      "trial_index": 2,
+      "trial_type": "short_clench"
+    },
+    {
+      "duration_seconds": 2.0,
+      "end_event": null,
+      "interval_label": "neutral",
+      "prompt": "Relax before short clench 3",
+      "start_event": null,
+      "trial_index": 3,
+      "trial_type": "neutral"
+    },
+    {
+      "duration_seconds": 0.5,
+      "end_event": "jaw_clench_end",
+      "interval_label": "jaw_clench",
+      "prompt": "Short jaw clench 3",
+      "start_event": "jaw_clench_start",
+      "trial_index": 3,
+      "trial_type": "short_clench"
+    },
+    {
+      "duration_seconds": 2.0,
+      "end_event": null,
+      "interval_label": "neutral",
+      "prompt": "Relax before short clench 4",
+      "start_event": null,
+      "trial_index": 4,
+      "trial_type": "neutral"
+    },
+    {
+      "duration_seconds": 0.5,
+      "end_event": "jaw_clench_end",
+      "interval_label": "jaw_clench",
+      "prompt": "Short jaw clench 4",
+      "start_event": "jaw_clench_start",
+      "trial_index": 4,
+      "trial_type": "short_clench"
+    },
+    {
+      "duration_seconds": 2.0,
+      "end_event": null,
+      "interval_label": "neutral",
+      "prompt": "Relax before short clench 5",
+      "start_event": null,
+      "trial_index": 5,
+      "trial_type": "neutral"
+    },
+    {
+      "duration_seconds": 0.5,
+      "end_event": "jaw_clench_end",
+      "interval_label": "jaw_clench",
+      "prompt": "Short jaw clench 5",
+      "start_event": "jaw_clench_start",
+      "trial_index": 5,
+      "trial_type": "short_clench"
+    },
+    {
+      "duration_seconds": 2.0,
+      "end_event": null,
+      "interval_label": "neutral",
+      "prompt": "Relax before jaw hold 1",
+      "start_event": null,
+      "trial_index": 1,
+      "trial_type": "neutral"
+    },
+    {
+      "duration_seconds": 3.0,
+      "end_event": "jaw_hold_end",
+      "interval_label": "jaw_hold",
+      "prompt": "Hold jaw clench 1",
+      "start_event": "jaw_hold_start",
+      "trial_index": 1,
+      "trial_type": "jaw_hold"
+    },
+    {
+      "duration_seconds": 2.0,
+      "end_event": null,
+      "interval_label": "neutral",
+      "prompt": "Relax before jaw hold 2",
+      "start_event": null,
+      "trial_index": 2,
+      "trial_type": "neutral"
+    },
+    {
+      "duration_seconds": 3.0,
+      "end_event": "jaw_hold_end",
+      "interval_label": "jaw_hold",
+      "prompt": "Hold jaw clench 2",
+      "start_event": "jaw_hold_start",
+      "trial_index": 2,
+      "trial_type": "jaw_hold"
+    },
+    {
+      "duration_seconds": 2.0,
+      "end_event": null,
+      "interval_label": "neutral",
+      "prompt": "Relax before jaw hold 3",
+      "start_event": null,
+      "trial_index": 3,
+      "trial_type": "neutral"
+    },
+    {
+      "duration_seconds": 3.0,
+      "end_event": "jaw_hold_end",
+      "interval_label": "jaw_hold",
+      "prompt": "Hold jaw clench 3",
+      "start_event": "jaw_hold_start",
+      "trial_index": 3,
+      "trial_type": "jaw_hold"
+    },
+    {
+      "duration_seconds": 2.0,
+      "end_event": null,
+      "interval_label": "neutral",
+      "prompt": "Relax jaw",
+      "start_event": null,
+      "trial_index": 9,
+      "trial_type": "neutral"
+    }
+  ],
+  "row_map": {
+    "0": "package_counter",
+    "1": "exg_1",
+    "2": "exg_2",
+    "3": "exg_3",
+    "4": "exg_4",
+    "5": "exg_5",
+    "6": "exg_6",
+    "7": "exg_7",
+    "8": "exg_8",
+    "9": "loff_statp",
+    "10": "loff_statn",
+    "11": "accel_x",
+    "12": "accel_y",
+    "13": "accel_z",
+    "14": "gyro_x",
+    "15": "gyro_y",
+    "16": "gyro_z",
+    "17": "mag_x",
+    "18": "mag_y",
+    "19": "mag_z",
+    "20": "timestamp",
+    "21": "marker"
+  },
+  "samples": 3936,
+  "started_at": "20260425-205958"
+}

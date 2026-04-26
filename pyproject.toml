@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "ahrs>=0.3.1",
     "brainflow>=5.21.0",
+    "matplotlib>=3.8",
     "numpy>=1.26",
     "PyOpenGL>=3.1.7",
     "pyserial>=3.5",
