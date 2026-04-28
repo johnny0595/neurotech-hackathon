@@ -224,7 +224,8 @@ class QtCursorController:
             self._rem_x = 0.0
         if y in (bounds.top(), bounds.bottom()):
             self._rem_y = 0.0
-        QCursor.setPos(QPoint(x, y))
+        if not post_mouse_move(x, y, x - position.x(), y - position.y()):
+            QCursor.setPos(QPoint(x, y))
 
     def click_left(self) -> bool:
         position = QCursor.pos()
@@ -239,6 +240,12 @@ def post_left_click(x: int, y: int) -> bool:
     if _post_left_click_coregraphics(x, y):
         return True
     return _post_left_click_osascript(x, y)
+
+
+def post_mouse_move(x: int, y: int, dx: int = 0, dy: int = 0) -> bool:
+    """Post one global mouse move at screen coordinates."""
+
+    return _post_mouse_move_coregraphics(x, y, dx, dy)
 
 
 def _post_left_click_quartz(x: int, y: int) -> bool:
@@ -326,6 +333,68 @@ def _post_left_click_coregraphics(x: int, y: int) -> bool:
     finally:
         core_foundation.CFRelease(down)
         core_foundation.CFRelease(up)
+    return True
+
+
+def _post_mouse_move_coregraphics(x: int, y: int, dx: int, dy: int) -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        app_services = ctypes.CDLL(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+        core_foundation = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+    except OSError:
+        return False
+
+    app_services.CGEventCreateMouseEvent.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        _CGPoint,
+        ctypes.c_uint32,
+    ]
+    app_services.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+    app_services.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    app_services.CGEventPost.restype = None
+    app_services.CGEventSetIntegerValueField.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_int64,
+    ]
+    app_services.CGEventSetIntegerValueField.restype = None
+    core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+    core_foundation.CFRelease.restype = None
+
+    k_cg_hid_event_tap = 0
+    k_cg_event_mouse_moved = 5
+    k_cg_mouse_event_delta_x = 4
+    k_cg_mouse_event_delta_y = 5
+    k_cg_mouse_button_left = 0
+    point = _CGPoint(float(x), float(y))
+    event = app_services.CGEventCreateMouseEvent(
+        None,
+        k_cg_event_mouse_moved,
+        point,
+        k_cg_mouse_button_left,
+    )
+    if not event:
+        return False
+    try:
+        app_services.CGEventSetIntegerValueField(
+            event,
+            k_cg_mouse_event_delta_x,
+            int(dx),
+        )
+        app_services.CGEventSetIntegerValueField(
+            event,
+            k_cg_mouse_event_delta_y,
+            int(dy),
+        )
+        app_services.CGEventPost(k_cg_hid_event_tap, event)
+    finally:
+        core_foundation.CFRelease(event)
     return True
 
 
